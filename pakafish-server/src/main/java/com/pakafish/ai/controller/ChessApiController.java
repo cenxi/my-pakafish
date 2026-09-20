@@ -28,9 +28,10 @@ public class ChessApiController {
     @PostMapping("/analyze")
     public EngineAnalysisResult analyze(@RequestBody Map<String, Object> request) {
         String fen = (String) request.getOrDefault("fen", "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1");
-        Integer movetime = request.containsKey("movetime") ? (Integer) request.get("movetime") : 1000;
+        Integer movetime = request.containsKey("movetime") ? (Integer) request.get("movetime") : null;
+        Integer depth = request.containsKey("depth") ? (Integer) request.get("depth") : null;
 
-        EngineAnalysisResult result = pikafishEngineService.analyzePosition(fen, movetime);
+        EngineAnalysisResult result = pikafishEngineService.analyzePosition(fen, depth, movetime);
         if (result != null && result.getBestMove() != null) {
             result.setBestMoveChinese(coordinateConverter.uciToChinese(fen, result.getBestMove()));
             result.setPvMovesChinese(coordinateConverter.convertMoveList(fen, result.getPvMoves()));

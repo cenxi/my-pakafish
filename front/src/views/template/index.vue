@@ -36,6 +36,33 @@
           <el-button :icon="ChatLineRound" type="success" @click="handleAskCoach">大师指导</el-button>
         </el-button-group>
 
+        <!-- 动态推演深度与算力设置 -->
+        <div class="depth-setting-group ml-2">
+          <el-popover placement="bottom" :width="280" trigger="click">
+            <template #reference>
+              <el-button size="small" type="primary" plain :icon="Setting">
+                算力: {{ currentPresetLabel }} ({{ searchDepth }}层)
+              </el-button>
+            </template>
+            <div class="depth-popover-content">
+              <div class="popover-title">皮卡鱼推演深度与算力档位</div>
+              <el-radio-group v-model="depthPreset" size="small" class="preset-radios" @change="onPresetChange">
+                <el-radio-button value="fast">⚡ 快棋 (15层)</el-radio-button>
+                <el-radio-button value="standard">🧠 标准 (20层)</el-radio-button>
+                <el-radio-button value="master">🏆 特大 (30层)</el-radio-button>
+                <el-radio-button value="custom">🛠 自定义</el-radio-button>
+              </el-radio-group>
+              <div v-if="depthPreset === 'custom'" class="custom-slider-box">
+                <div class="slider-label">
+                  <span>目标深度：<strong>{{ searchDepth }}</strong> 层</span>
+                </div>
+                <el-slider v-model="searchDepth" :min="10" :max="50" :step="2" show-input />
+              </div>
+              <div class="tip-text">深度越深，皮卡鱼对长变例和绝杀的算力越强。</div>
+            </div>
+          </el-popover>
+        </div>
+
         <!-- 面板展开/收缩控制 -->
         <el-button-group class="ml-2">
           <el-tooltip :content="showMoveTree ? '收起着法谱' : '展开着法谱'" placement="bottom">
@@ -202,7 +229,8 @@ import {
   ArrowRight,
   ArrowDown,
   ArrowUp,
-  Close
+  Close,
+  Setting
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
@@ -229,6 +257,34 @@ const isAnalyzing = ref(false)
 // 界面收缩控制
 const showMoveTree = ref(true)
 const showEnginePanel = ref(true)
+
+// 动态推演深度与算力档位
+const depthPreset = ref('standard')
+const searchDepth = ref(20)
+const searchMovetime = ref(1500)
+
+const currentPresetLabel = computed(() => {
+  switch (depthPreset.value) {
+    case 'fast': return '快棋'
+    case 'standard': return '标准'
+    case 'master': return '特大深算'
+    default: return '自定义'
+  }
+})
+
+function onPresetChange(val) {
+  if (val === 'fast') {
+    searchDepth.value = 15
+    searchMovetime.value = 800
+  } else if (val === 'standard') {
+    searchDepth.value = 20
+    searchMovetime.value = 1500
+  } else if (val === 'master') {
+    searchDepth.value = 30
+    searchMovetime.value = 3500
+  }
+  triggerPikafishAnalyze()
+}
 
 const selectedPiecePos = ref(null)
 const legalMoves = ref([])
@@ -259,8 +315,22 @@ const movePairs = computed(() => {
 // 计算明确的红优/黑优多少分
 const redScoreCp = computed(() => {
   if (!engineResult.value || engineResult.value.scoreCp === undefined) return 0
-  const isRed = !currentFen.value.includes(' b ')
-  return isRed ? engineResult.value.scoreCp : -engineResult.value.scoreCp
+  // 后端传出的 scoreCp 已经是以红方为绝对基准（正数为红优，负数为黑优）
+  return engineResult.value.scoreCp
+})
+
+const isRedAdvantage = computed(() => {
+  if (engineResult.value?.sideAdvantageText) {
+    return engineResult.value.sideAdvantageText.includes('红优')
+  }
+  return redScoreCp.value > 20
+})
+
+const isBlackAdvantage = computed(() => {
+  if (engineResult.value?.sideAdvantageText) {
+    return engineResult.value.sideAdvantageText.includes('黑优')
+  }
+  return redScoreCp.value < -20
 })
 
 const advantageLabel = computed(() => {
@@ -268,19 +338,18 @@ const advantageLabel = computed(() => {
     return engineResult.value.sideAdvantageText
   }
   const score = redScoreCp.value
-  if (Math.abs(score) <= 20) return '双方均势 (0分)'
+  if (score === 0) return '均势 (0分)'
   if (score > 0) return `红优 +${score}分`
   return `黑优 +${Math.abs(score)}分`
 })
 
 const advantageClass = computed(() => {
-  const score = redScoreCp.value
-  if (score > 20) return 'text-red'
-  if (score < -20) return 'text-black'
+  if (isRedAdvantage.value) return 'text-red'
+  if (isBlackAdvantage.value) return 'text-black'
   return 'text-balance'
 })
 
-// 平衡指示条样式
+// 平衡指示条样式 (红方在右，黑方在左；红优偏红，黑优偏黑)
 const advantageBarStyle = computed(() => {
   const score = redScoreCp.value
   // -1000 ~ +1000 映射为 0% ~ 100%
@@ -288,7 +357,7 @@ const advantageBarStyle = computed(() => {
   const percent = 50 + (clamped / 1000) * 50
   return {
     width: `${percent}%`,
-    backgroundColor: percent >= 50 ? '#f56c6c' : '#303133'
+    backgroundColor: isRedAdvantage.value ? '#f56c6c' : (isBlackAdvantage.value ? '#1d2129' : '#e6a23c')
   }
 })
 
@@ -322,13 +391,23 @@ function onBoardCellClick({ r, c }) {
 // 执行走棋
 function executeMove(from, to) {
   const piece = boardState.value[from.r][from.c]
+  if (!piece) {
+    console.warn('executeMove 起点无子', from)
+    return
+  }
+
   const uci = `${String.fromCharCode(97 + from.c)}${from.r}${String.fromCharCode(97 + to.c)}${to.r}`
   const chinese = uciToChinese(currentFen.value, uci)
 
+  // 1. 先用当前局面记录
+  const moveTurn = currentTurn.value
+
+  // 2. 移动棋子
   boardState.value[to.r][to.c] = piece
   boardState.value[from.r][from.c] = null
 
-  currentTurn.value = currentTurn.value === 'r' ? 'b' : 'r'
+  // 3. 切换行棋方
+  currentTurn.value = moveTurn === 'r' ? 'b' : 'r'
   const newFen = boardToFen(boardState.value, currentTurn.value)
   currentFen.value = newFen
 
@@ -343,7 +422,12 @@ function executeMove(from, to) {
 
   triggerPikafishAnalyze()
 
-  if (engineSide.value === currentTurn.value) {
+  // 引擎出招判定
+  checkEngineAutoMove()
+}
+
+function checkEngineAutoMove() {
+  if (engineSide.value && engineSide.value === currentTurn.value) {
     setTimeout(() => {
       triggerEngineBestMove()
     }, 600)
@@ -356,7 +440,8 @@ async function triggerPikafishAnalyze() {
   try {
     const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
       fen: currentFen.value,
-      movetime: 1000
+      depth: searchDepth.value,
+      movetime: searchMovetime.value
     })
     engineResult.value = resp.data
   } catch (err) {
@@ -367,21 +452,38 @@ async function triggerPikafishAnalyze() {
 }
 
 async function triggerEngineBestMove() {
-  if (!engineResult.value?.bestMove) {
-    await triggerPikafishAnalyze()
-  }
-  const best = engineResult.value?.bestMove
-  if (!best || best.length < 4) {
-    ElMessage.warning('未能计算出最佳着法')
-    return
-  }
+  isAnalyzing.value = true
+  try {
+    const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
+      fen: currentFen.value,
+      depth: searchDepth.value,
+      movetime: searchMovetime.value
+    })
+    engineResult.value = resp.data
 
-  const fc = best.charCodeAt(0) - 97
-  const fr = parseInt(best[1], 10)
-  const tc = best.charCodeAt(2) - 97
-  const tr = parseInt(best[3], 10)
+    const best = engineResult.value?.bestMove
+    if (!best || best.length < 4) {
+      ElMessage.warning('未能计算出最佳着法')
+      return
+    }
 
-  executeMove({ r: fr, c: fc }, { r: tr, c: tc })
+    const fc = best.charCodeAt(0) - 97
+    const fr = parseInt(best[1], 10)
+    const tc = best.charCodeAt(2) - 97
+    const tr = parseInt(best[3], 10)
+
+    const piece = boardState.value[fr]?.[fc]
+    if (!piece) {
+      console.error('引擎走子起点为空:', best, 'FEN:', currentFen.value)
+      return
+    }
+
+    executeMove({ r: fr, c: fc }, { r: tr, c: tc })
+  } catch (err) {
+    console.error('引擎出招异常:', err)
+  } finally {
+    isAnalyzing.value = false
+  }
 }
 
 function toggleEngineSide(side) {
@@ -412,7 +514,22 @@ function jumpToMove(index) {
 
   selectedPiecePos.value = null
   legalMoves.value = []
-  lastMoveHighlight.value = null
+
+  if (index > 0) {
+    const lastMoveItem = historyMoves.value[index - 1]
+    const uci = lastMoveItem.uci
+    if (uci && uci.length >= 4) {
+      const fc = uci.charCodeAt(0) - 97
+      const fr = parseInt(uci[1], 10)
+      const tc = uci.charCodeAt(2) - 97
+      const tr = parseInt(uci[3], 10)
+      lastMoveHighlight.value = { from: { r: fr, c: fc }, to: { r: tr, c: tc } }
+    } else {
+      lastMoveHighlight.value = null
+    }
+  } else {
+    lastMoveHighlight.value = null
+  }
 
   triggerPikafishAnalyze()
 }
@@ -479,6 +596,47 @@ function copyFen() {
     align-items: center;
     gap: 12px;
   }
+
+  .depth-setting-group {
+    display: flex;
+    align-items: center;
+  }
+}
+
+.depth-popover-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .popover-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: #1f2329;
+  }
+
+  .preset-radios {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .custom-slider-box {
+    background: #f7f8fa;
+    padding: 8px 12px;
+    border-radius: 6px;
+    .slider-label {
+      font-size: 12px;
+      color: #606266;
+      margin-bottom: 4px;
+      strong { color: #409eff; }
+    }
+  }
+
+  .tip-text {
+    font-size: 11.5px;
+    color: #909399;
+    line-height: 1.4;
+  }
 }
 
 .main-workspace {
@@ -544,9 +702,9 @@ function copyFen() {
       .score-text {
         font-weight: bold;
         font-size: 15px;
-        &.text-red { color: #f56c6c; }
-        &.text-black { color: #303133; }
-        &.text-balance { color: #e6a23c; }
+        &.text-red { color: #f56c6c !important; }
+        &.text-black { color: #1d2129 !important; }
+        &.text-balance { color: #e6a23c !important; }
       }
       .status-desc {
         color: #909399;

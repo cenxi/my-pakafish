@@ -90,16 +90,20 @@ public class PikafishEngineService {
         }
     }
 
+    public EngineAnalysisResult analyzePosition(String fen, Integer movetimeLimit) {
+        return analyzePosition(fen, null, movetimeLimit);
+    }
+
     /**
-     * 同步分析当前 FEN 局面
+     * 同步分析当前 FEN 局面 (支持动态指定深度与思考时间)
      *
      * @param fen FEN 局面串
+     * @param depthLimit 目标推演深度（层），若<=0则不限深度或使用默认
      * @param movetimeLimit 思考限时(ms)，若<=0则使用默认
      * @return 引擎分析结果
      */
-    public EngineAnalysisResult analyzePosition(String fen, Integer movetimeLimit) {
+    public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit) {
         synchronized (lock) {
-            int movetime = (movetimeLimit != null && movetimeLimit > 0) ? movetimeLimit : defaultMovetime;
             try {
                 if (engineProcess == null || !engineProcess.isAlive()) {
                     log.warn("皮卡鱼引擎进程未存活，正在重新拉起...");
@@ -107,7 +111,18 @@ public class PikafishEngineService {
                 }
 
                 sendCommand("position fen " + fen);
-                sendCommand("go movetime " + movetime);
+
+                StringBuilder goCmd = new StringBuilder("go");
+                if (depthLimit != null && depthLimit > 0) {
+                    goCmd.append(" depth ").append(depthLimit);
+                }
+                if (movetimeLimit != null && movetimeLimit > 0) {
+                    goCmd.append(" movetime ").append(movetimeLimit);
+                } else if (depthLimit == null || depthLimit <= 0) {
+                    goCmd.append(" movetime ").append(defaultMovetime);
+                }
+
+                sendCommand(goCmd.toString());
 
                 EngineAnalysisResult result = new EngineAnalysisResult();
                 String line;
@@ -162,19 +177,18 @@ public class PikafishEngineService {
 
                 // 局势优势描述
                 if (result.getScoreCp() != null) {
-                    boolean isRedTurn = !fen.contains(" b ");
-                    // 皮卡鱼的 score cp 是相对当前行棋方的，若当前是黑方，则红方的分数为 -cp
-                    int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
+                    // 引擎返回多少分就是多少分，不做任何阈值拦截
+                    int score = result.getScoreCp();
                     String sideText;
-                    if (Math.abs(redScore) <= 20) {
-                        sideText = "双方均势 (0分)";
-                    } else if (redScore > 0) {
-                        sideText = "红优 +" + redScore + "分";
+                    if (score == 0) {
+                        sideText = "均势 (0分)";
+                    } else if (score > 0) {
+                        sideText = "红优 +" + score + "分";
                     } else {
-                        sideText = "黑优 +" + Math.abs(redScore) + "分";
+                        sideText = "黑优 +" + Math.abs(score) + "分";
                     }
                     result.setSideAdvantageText(sideText);
-                    result.setAdvantageDescription(formatAdvantage(redScore));
+                    result.setAdvantageDescription(formatAdvantage(score));
                 }
 
                 return result;

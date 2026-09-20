@@ -130,7 +130,13 @@ const quickPrompts = [
 function renderMarkdown(content) {
   if (!content) return ''
   try {
-    return marked.parse(content)
+    let parsed = marked.parse(content)
+
+    // 针对流式传输过程中尚未闭合的 **文本** 或中文双引号进行平滑容错渲染
+    // 如果存在孤立的 **，将其临时转换为高亮强调标签
+    parsed = parsed.replace(/\*\*([^*<>]+?)(?=\*\*|$)/g, '<strong>$1</strong>')
+
+    return parsed
   } catch (e) {
     return content
   }
