@@ -1,0 +1,65 @@
+// 颜色
+$primary-color: #409eff;
+$success-color: #67c23a;
+$warning-color: #e6a23c;
+$danger-color: #f56c6c;
+$info-color: #909399;
+
+// 背景
+$bg-color: #f0f2f5;
+$menu-bg: #304156;
+$menu-active-bg: #E8F3FF;
+
+// 文字
+$text-primary: #0a1c40;
+$text-regular: #606266;
+$text-secondary: #333333;
+$text-placeholder: #c0c4cc;
+
+// 尺寸
+$header-height: 48px;
+$sidebar-width: 200px;
+$sidebar-collapsed-width: 64px;
+
+// 边框
+$border-color: #e5e6e8;
+$border-light: #e4e7ed;
+
+// 菜单
+$menu-text-color: #333;
+$menu-active-color: #2769FF;
+
+
+
+
+/* 全局Element Plus主题变量覆盖 - 使用最高优先级 */
+:root {
+  --el-color-primary: #2066fe;
+  --el-color-primary-light-3: #4d8bff;
+  --el-color-primary-light-5: #7daaff;
+  --el-color-primary-light-7: #aec5ff;
+  --el-color-primary-light-8: #c4d4ff;
+  --el-color-primary-light-9: #d9e4ff;
+  --el-color-primary-dark-2: #1a52cc;
+}
+
+/* 确保变量优先级足够高 */
+html {
+  --el-color-primary: #2066fe !important;
+  --el-color-primary-light-3: #4d8bff !important;
+  --el-color-primary-light-5: #7daaff !important;
+  --el-color-primary-light-7: #aec5ff !important;
+  --el-color-primary-light-8: #c4d4ff !important;
+  --el-color-primary-light-9: #d9e4ff !important;
+  --el-color-primary-dark-2: #1a52cc !important;
+}
+
+body {
+  --el-color-primary: #2066fe !important;
+  --el-color-primary-light-3: #4d8bff !important;
+  --el-color-primary-light-5: #7daaff !important;
+  --el-color-primary-light-7: #aec5ff !important;
+  --el-color-primary-light-8: #c4d4ff !important;
+  --el-color-primary-light-9: #d9e4ff !important;
+  --el-color-primary-dark-2: #1a52cc !important;
+}

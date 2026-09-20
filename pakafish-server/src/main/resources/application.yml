@@ -1,0 +1,21 @@
+server:
+  port: 8080
+
+pikafish:
+  # 皮卡鱼可执行文件绝对路径
+  engine-path: "C:\\Users\\cxzgsun\\Downloads\\Pikafish.2026-09-06\\Pikafish-Windows-x86-64-universal.exe"
+  # 皮卡鱼工作目录（存放 pikafish.nnue 的目录）
+  work-dir: "C:\\Users\\cxzgsun\\Downloads\\Pikafish.2026-09-06"
+  # 默认搜索深度或超时时间 (毫秒)
+  default-depth: 15
+  default-movetime: 1500
+  threads: 2
+  hash: 64
+
+llm:
+  openai:
+    # 兼容 OpenAI 的 API Base URL (如 DeepSeek: https://api.deepseek.com/v1, 通义千问, 或自建服务)
+    base-url: "https://api.openai.com/v1"
+    api-key: "sk-placeholder"
+    model-name: "gpt-4o-mini"
+    temperature: 0.7

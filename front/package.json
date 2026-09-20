@@ -1,0 +1,28 @@
+{
+  "name": "tds-cmpl-front",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --mode production"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.21",
+    "element-plus": "^2.9.1",
+    "marked": "^18.0.13",
+    "nprogress": "^0.2.0",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "sass": "^1.83.0",
+    "unplugin-auto-import": "^0.18.6",
+    "unplugin-vue-components": "^0.27.5",
+    "vite": "^6.0.5"
+  }
+}
