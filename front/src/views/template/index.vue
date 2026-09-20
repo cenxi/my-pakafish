@@ -642,31 +642,32 @@ function copyFen() {
 .main-workspace {
   flex: 1;
   display: flex;
-  padding: 14px;
-  gap: 14px;
+  padding: 12px;
+  gap: 12px;
   min-height: 0;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
-// 左列
+// 左列 (根据屏幕高度自适应缩放，保持棋盘完整不变形)
 .left-board-col {
-  width: 580px;
+  width: min(560px, 42vw, calc((100vh - 180px) * 0.9));
+  min-width: 320px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-shrink: 0;
 
   .step-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     background: #ffffff;
-    padding: 6px 14px;
+    padding: 4px 10px;
     border-radius: 6px;
     border: 1px solid #ebeef5;
     width: 100%;
-    max-width: 580px;
     box-sizing: border-box;
     justify-content: center;
 
@@ -674,15 +675,14 @@ function copyFen() {
       font-size: 13px;
       font-weight: bold;
       color: #606266;
-      margin: 0 6px;
+      margin: 0 4px;
     }
   }
 
   .eval-bar-card {
     width: 100%;
-    max-width: 580px;
     background: #ffffff;
-    padding: 10px 14px;
+    padding: 8px 12px;
     border-radius: 6px;
     border: 1px solid #ebeef5;
     box-sizing: border-box;
@@ -691,8 +691,8 @@ function copyFen() {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 8px;
-      font-size: 13.5px;
+      margin-bottom: 6px;
+      font-size: 13px;
 
       .turn-tag {
         font-weight: bold;
@@ -701,21 +701,21 @@ function copyFen() {
       }
       .score-text {
         font-weight: bold;
-        font-size: 15px;
+        font-size: 14.5px;
         &.text-red { color: #f56c6c !important; }
         &.text-black { color: #1d2129 !important; }
         &.text-balance { color: #e6a23c !important; }
       }
       .status-desc {
         color: #909399;
-        font-size: 12.5px;
+        font-size: 12px;
       }
     }
 
     .advantage-bar-wrapper {
-      height: 10px;
+      height: 8px;
       background: #e4e7ed;
-      border-radius: 5px;
+      border-radius: 4px;
       overflow: hidden;
       display: flex;
       align-items: center;
@@ -729,7 +729,8 @@ function copyFen() {
 
 // 中列：着法列表
 .center-move-tree {
-  width: 200px;
+  width: min(200px, 15vw);
+  min-width: 150px;
   background: #ffffff;
   border-radius: 8px;
   border: 1px solid #ebeef5;
@@ -806,9 +807,10 @@ function copyFen() {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-width: 380px;
+  gap: 10px;
+  min-width: 320px;
   min-height: 0;
+  overflow: hidden;
 
   .coach-chat-wrap {
     flex: 1;

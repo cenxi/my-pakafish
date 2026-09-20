@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="pieceBg" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#fff5e6" />
+      <stop offset="60%" stop-color="#deb887" />
+      <stop offset="100%" stop-color="#8b5a2b" />
+    </radialGradient>
+    <radialGradient id="redPiece" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#ff8585" />
+      <stop offset="60%" stop-color="#d91f11" />
+      <stop offset="100%" stop-color="#7a0000" />
+    </radialGradient>
+  </defs>
+  <!-- 棋子外圈 -->
+  <circle cx="32" cy="32" r="30" fill="url(#redPiece)" stroke="#4a0000" stroke-width="2" />
+  <circle cx="32" cy="32" r="25" fill="none" stroke="#ffcccc" stroke-width="1.5" />
+  <!-- 中国象棋“帅”或“鱼”字 -->
+  <text x="32" y="42" font-family="'STKaiti', 'Kaiti', 'SimSun', serif" font-size="28" font-weight="bold" fill="#ffffff" text-anchor="middle">魚</text>
+</svg>
