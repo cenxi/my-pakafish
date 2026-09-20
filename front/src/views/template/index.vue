@@ -426,17 +426,13 @@ function executeMove(from, to) {
   historyMoves.value.push({ uci, chinese, fen: newFen })
   currentMoveIndex.value = historyMoves.value.length
 
-  triggerPikafishAnalyze()
-
-  // 引擎出招判定
-  checkEngineAutoMove()
-}
-
-function checkEngineAutoMove() {
+  // 如果轮到引擎执子，直接让引擎计算并落子（不再重复发起纯分析）
   if (engineSide.value && engineSide.value === currentTurn.value) {
     setTimeout(() => {
       triggerEngineBestMove()
-    }, 600)
+    }, 400)
+  } else {
+    triggerPikafishAnalyze()
   }
 }
 
@@ -458,8 +454,7 @@ async function triggerPikafishAnalyze() {
 }
 
 async function triggerEngineBestMove() {
-  // 如果正在分析或当前无有效走子方，阻止重复并发进入
-  if (isAnalyzing.value) return
+  if (currentTurn.value !== (engineSide.value || currentTurn.value)) return
 
   isAnalyzing.value = true
   try {
@@ -487,12 +482,13 @@ async function triggerEngineBestMove() {
       return
     }
 
-    // 严密检查：引擎走出的子必须是当前行棋方 (currentTurn) 的棋子，防止连下两手同一方
+    // 严密检查：引擎走出的子必须是当前行棋方 (currentTurn) 的棋子
     if (piece.color !== currentTurn.value) {
       console.warn('引擎计算出的走法与当前行棋方不一致，拒绝执行:', best, '棋子色:', piece.color, '当前方:', currentTurn.value)
       return
     }
 
+    // 落子
     executeMove({ r: fr, c: fc }, { r: tr, c: tc })
   } catch (err) {
     console.error('引擎出招异常:', err)
@@ -506,8 +502,11 @@ function toggleEngineSide(side) {
     engineSide.value = null
   } else {
     engineSide.value = side
+    // 如果当前轮到引擎走棋（例如开局点击“引擎执红”，红方先行），立即出招
     if (engineSide.value === currentTurn.value) {
-      triggerEngineBestMove()
+      setTimeout(() => {
+        triggerEngineBestMove()
+      }, 300)
     }
   }
 }
@@ -828,8 +827,10 @@ function copyFen() {
   overflow: hidden;
 
   .coach-chat-wrap {
-    flex: 1;
-    min-height: 0;
+    flex: 1 1 auto;
+    min-height: 260px;
+    height: 50%;
+    overflow: hidden;
   }
 
   .engine-panel-card {
@@ -841,6 +842,7 @@ function copyFen() {
     flex-direction: column;
     gap: 10px;
     transition: all 0.3s ease;
+    flex-shrink: 0;
 
     .engine-header {
       display: flex;

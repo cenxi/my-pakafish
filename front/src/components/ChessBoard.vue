@@ -66,17 +66,20 @@
               <!-- 走子落点合法高亮小绿圈 -->
               <div v-if="isLegalMove(r, c)" class="legal-dot"></div>
 
-              <!-- 上一步走棋轨迹标记 -->
-              <div v-if="isLastMoveCell(r, c)" class="last-move-highlight"></div>
-
               <!-- 选中的棋子高亮圈 -->
               <div v-if="isSelectedCell(r, c)" class="selected-ring"></div>
+
+              <!-- 最新走棋：起点与终点外发光与脉冲光环 (走动标识) -->
+              <div v-if="isLastMoveFrom(r, c)" class="move-from-marker"></div>
+              <div v-if="isLastMoveTo(r, c)" class="move-to-marker">
+                <div class="pulsing-ring"></div>
+              </div>
 
               <!-- 棋子本身 -->
               <div
                 v-if="getPiece(r, c)"
                 class="chess-piece"
-                :class="[getPiece(r, c).color, { selected: isSelectedCell(r, c) }]"
+                :class="[getPiece(r, c).color, { selected: isSelectedCell(r, c), 'last-moved': isLastMoveTo(r, c) }]"
               >
                 <div class="piece-inner">
                   <span class="piece-char">{{ getPieceName(getPiece(r, c)) }}</span>
@@ -130,14 +133,18 @@ function isLegalMove(displayR, displayC) {
   return props.legalMoves.some(m => m.r === actualR && m.c === actualC)
 }
 
-function isLastMoveCell(displayR, displayC) {
-  if (!props.lastMove) return false
+function isLastMoveFrom(displayR, displayC) {
+  if (!props.lastMove || !props.lastMove.from) return false
   const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
-  return (
-    (props.lastMove.from.r === actualR && props.lastMove.from.c === actualC) ||
-    (props.lastMove.to.r === actualR && props.lastMove.to.c === actualC)
-  )
+  return props.lastMove.from.r === actualR && props.lastMove.from.c === actualC
+}
+
+function isLastMoveTo(displayR, displayC) {
+  if (!props.lastMove || !props.lastMove.to) return false
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
+  const actualC = props.isFlipped ? (8 - displayC) : displayC
+  return props.lastMove.to.r === actualR && props.lastMove.to.c === actualC
 }
 
 function getCellStyle(displayR, displayC) {
@@ -253,14 +260,48 @@ const suggestMoveCoord = computed(() => {
   pointer-events: none;
 }
 
-.last-move-highlight {
+.move-from-marker {
   position: absolute;
   width: 82%;
   height: 82%;
   border-radius: 50%;
-  border: 2px dashed #409eff;
-  background: rgba(64, 158, 255, 0.15);
+  border: 2px dashed #e6a23c;
+  background: rgba(230, 162, 60, 0.2);
   pointer-events: none;
+  z-index: 2;
+}
+
+.move-to-marker {
+  position: absolute;
+  width: 90%;
+  height: 90%;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 4;
+
+  .pulsing-ring {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 3px solid #409eff;
+    box-shadow: 0 0 12px #409eff;
+    animation: movePulse 1.8s infinite;
+  }
+}
+
+@keyframes movePulse {
+  0% {
+    transform: scale(0.96);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(0.96);
+    opacity: 1;
+  }
 }
 
 .selected-ring {
@@ -287,6 +328,10 @@ const suggestMoveCoord = computed(() => {
 
   &.selected {
     transform: scale(1.08);
+  }
+
+  &.last-moved {
+    box-shadow: 0 0 16px rgba(64, 158, 255, 0.8), 0 4px 8px rgba(0, 0, 0, 0.35);
   }
 
   .piece-inner {

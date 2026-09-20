@@ -227,6 +227,8 @@ function startStreamChat(question) {
   box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
   border: 1px solid #ebeef5;
   transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
 
   &.fullscreen {
     position: fixed;
@@ -452,5 +454,7 @@ function startStreamChat(question) {
   padding: 12px 16px;
   border-top: 1px solid #f2f3f5;
   background: #ffffff;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 </style>
