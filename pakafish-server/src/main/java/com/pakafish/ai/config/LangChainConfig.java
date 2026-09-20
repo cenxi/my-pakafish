@@ -31,8 +31,8 @@ public class LangChainConfig {
                 .modelName(modelName)
                 .temperature(temperature)
                 .timeout(Duration.ofSeconds(60))
-                .logRequests(true)
-                .logResponses(true)
+                .logRequests(false)
+                .logResponses(false)
                 .build();
     }
 }

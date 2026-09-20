@@ -7,20 +7,17 @@ NProgress.configure({ showSpinner: false })
 const routes = [
   {
     path: '/',
-    component: () => import('@/layout/index.vue'),
-    redirect: '/template',
-    children: [
-      {
-        path: 'template',
-        name: 'Template',
-        component: () => import('@/views/template/index.vue'),
-        meta: { title: '模板页面', icon: 'Document' }
-      }
-    ]
+    redirect: '/chess'
+  },
+  {
+    path: '/chess',
+    name: 'ChessGame',
+    component: () => import('@/views/template/index.vue'),
+    meta: { title: '皮卡鱼·AI象棋特大' }
   },
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/template'
+    redirect: '/chess'
   }
 ]
 
@@ -31,7 +28,7 @@ const router = createRouter({
 
 router.beforeEach((to, from, next) => {
   NProgress.start()
-  document.title = to.meta.title ? `${to.meta.title} - 合规智能助手` : '合规智能助手'
+  document.title = to.meta.title ? `${to.meta.title}` : '皮卡鱼·AI象棋特大'
   next()
 })
 

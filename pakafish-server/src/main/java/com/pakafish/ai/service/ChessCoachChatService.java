@@ -69,7 +69,9 @@ public class ChessCoachChatService {
             @Override
             public void onNext(String token) {
                 try {
-                    emitter.send(SseEmitter.event().data(token));
+                    // 转义换行符避免破坏 SSE 的 "data: line\n\n" 协议
+                    String encoded = token.replace("\r", "").replace("\n", "\\n");
+                    emitter.send(SseEmitter.event().data(encoded));
                 } catch (IOException e) {
                     log.warn("SSE 推流写入中断: {}", e.getMessage());
                 }

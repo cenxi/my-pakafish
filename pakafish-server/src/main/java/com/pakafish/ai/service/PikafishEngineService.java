@@ -162,7 +162,19 @@ public class PikafishEngineService {
 
                 // 局势优势描述
                 if (result.getScoreCp() != null) {
-                    result.setAdvantageDescription(formatAdvantage(result.getScoreCp()));
+                    boolean isRedTurn = !fen.contains(" b ");
+                    // 皮卡鱼的 score cp 是相对当前行棋方的，若当前是黑方，则红方的分数为 -cp
+                    int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
+                    String sideText;
+                    if (Math.abs(redScore) <= 20) {
+                        sideText = "双方均势 (0分)";
+                    } else if (redScore > 0) {
+                        sideText = "红优 +" + redScore + "分";
+                    } else {
+                        sideText = "黑优 +" + Math.abs(redScore) + "分";
+                    }
+                    result.setSideAdvantageText(sideText);
+                    result.setAdvantageDescription(formatAdvantage(redScore));
                 }
 
                 return result;

@@ -31,4 +31,6 @@ public class EngineAnalysisResult {
     private List<String> pvMovesChinese;
     /** 优势描述 (如: 红方大优、局势均势、黑方微优) */
     private String advantageDescription;
+    /** 明确的红黑优劣描述 (例如: 红优 +180分 或 黑优 +240分 或 双方均势) */
+    private String sideAdvantageText;
 }

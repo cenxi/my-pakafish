@@ -43,8 +43,8 @@ public class ChessApiController {
      */
     @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamChat(
-            @RequestParam(required = false, defaultValue = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1") String fen,
-            @RequestParam(required = false, defaultValue = "") String question) {
+            @RequestParam(value = "fen", required = false, defaultValue = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1") String fen,
+            @RequestParam(value = "question", required = false, defaultValue = "") String question) {
 
         SseEmitter emitter = new SseEmitter(120_000L); // 2分钟超时
         // 异步执行流式对话
