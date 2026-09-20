@@ -396,6 +396,12 @@ function executeMove(from, to) {
     return
   }
 
+  // 严格校验：落子方必须匹配当前的行棋方 (currentTurn)
+  if (piece.color !== currentTurn.value) {
+    console.warn('非当前行棋方走子，已拦截:', piece.color, '当前方:', currentTurn.value)
+    return
+  }
+
   const uci = `${String.fromCharCode(97 + from.c)}${from.r}${String.fromCharCode(97 + to.c)}${to.r}`
   const chinese = uciToChinese(currentFen.value, uci)
 
@@ -406,7 +412,7 @@ function executeMove(from, to) {
   boardState.value[to.r][to.c] = piece
   boardState.value[from.r][from.c] = null
 
-  // 3. 切换行棋方
+  // 3. 严格切换行棋方 (红->黑，黑->红)
   currentTurn.value = moveTurn === 'r' ? 'b' : 'r'
   const newFen = boardToFen(boardState.value, currentTurn.value)
   currentFen.value = newFen
@@ -452,6 +458,9 @@ async function triggerPikafishAnalyze() {
 }
 
 async function triggerEngineBestMove() {
+  // 如果正在分析或当前无有效走子方，阻止重复并发进入
+  if (isAnalyzing.value) return
+
   isAnalyzing.value = true
   try {
     const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
@@ -475,6 +484,12 @@ async function triggerEngineBestMove() {
     const piece = boardState.value[fr]?.[fc]
     if (!piece) {
       console.error('引擎走子起点为空:', best, 'FEN:', currentFen.value)
+      return
+    }
+
+    // 严密检查：引擎走出的子必须是当前行棋方 (currentTurn) 的棋子，防止连下两手同一方
+    if (piece.color !== currentTurn.value) {
+      console.warn('引擎计算出的走法与当前行棋方不一致，拒绝执行:', best, '棋子色:', piece.color, '当前方:', currentTurn.value)
       return
     }
 
