@@ -6,11 +6,11 @@ pikafish:
   engine-path: "C:\\Users\\cxzgsun\\Downloads\\Pikafish.2026-09-06\\Pikafish-Windows-x86-64-universal.exe"
   # 皮卡鱼工作目录（存放 pikafish.nnue 的目录）
   work-dir: "C:\\Users\\cxzgsun\\Downloads\\Pikafish.2026-09-06"
-  # 默认搜索深度或超时时间 (毫秒)
-  default-depth: 15
-  default-movetime: 1500
-  threads: 2
-  hash: 64
+  # 适配 i7-1165G7 (4物理核) 与 32GB 内存的最佳性能配置
+  default-depth: 25
+  default-movetime: 2000
+  threads: 4
+  hash: 512
 
 llm:
   openai:
