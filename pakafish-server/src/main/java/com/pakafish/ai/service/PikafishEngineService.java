@@ -177,18 +177,27 @@ public class PikafishEngineService {
 
                 // 局势优势描述
                 if (result.getScoreCp() != null) {
-                    // 引擎返回多少分就是多少分，不做任何阈值拦截
-                    int score = result.getScoreCp();
+                    // 正确解析红黑绝对分值：
+                    // 皮卡鱼引擎输出的 score cp 是相对于【当前执棋方】的！
+                    // 1) 如果当前轮到红方走 (fen 含 'w')，引擎返回的 cp 就是红方分值（正为红优，负为红劣/黑优）；
+                    // 2) 如果当前轮到黑方走 (fen 含 'b')，引擎返回的 cp 是黑方视角的优势值！
+                    //    因此转化为红方的绝对分值时，必须取反：redScore = -cp！
+                    boolean isRedTurn = !fen.contains(" b ");
+                    int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
+
+                    // 将绝对基准分赋回 result
+                    result.setScoreCp(redScore);
+
                     String sideText;
-                    if (score == 0) {
+                    if (redScore == 0) {
                         sideText = "均势 (0分)";
-                    } else if (score > 0) {
-                        sideText = "红优 +" + score + "分";
+                    } else if (redScore > 0) {
+                        sideText = "红优 +" + redScore + "分";
                     } else {
-                        sideText = "黑优 +" + Math.abs(score) + "分";
+                        sideText = "黑优 +" + Math.abs(redScore) + "分";
                     }
                     result.setSideAdvantageText(sideText);
-                    result.setAdvantageDescription(formatAdvantage(score));
+                    result.setAdvantageDescription(formatAdvantage(redScore));
                 }
 
                 return result;

@@ -53,10 +53,26 @@
                 <el-radio-button value="custom">🛠 自定义</el-radio-button>
               </el-radio-group>
               <div v-if="depthPreset === 'custom'" class="custom-slider-box">
-                <div class="slider-label">
-                  <span>目标深度：<strong>{{ searchDepth }}</strong> 层</span>
+                <div class="slider-row">
+                  <div class="slider-label">
+                    <span>目标深度：<strong>{{ searchDepth }}</strong> 层</span>
+                  </div>
+                  <el-slider v-model="searchDepth" :min="10" :max="60" :step="2" show-input @change="triggerPikafishAnalyze" />
                 </div>
-                <el-slider v-model="searchDepth" :min="10" :max="50" :step="2" show-input />
+                <div class="slider-row mt-2">
+                  <div class="slider-label">
+                    <span>思考限时：<strong>{{ searchMovetimeSec }}</strong> 秒</span>
+                  </div>
+                  <el-slider
+                    v-model="searchMovetimeSec"
+                    :min="0.5"
+                    :max="10"
+                    :step="0.5"
+                    show-input
+                    :format-tooltip="val => val + '秒'"
+                    @change="onMovetimeSecChange"
+                  />
+                </div>
               </div>
               <div class="tip-text">深度越深，皮卡鱼对长变例和绝杀的算力越强。</div>
             </div>
@@ -261,6 +277,7 @@ const showEnginePanel = ref(true)
 // 动态推演深度与算力档位
 const depthPreset = ref('standard')
 const searchDepth = ref(20)
+const searchMovetimeSec = ref(1.5)
 const searchMovetime = ref(1500)
 
 const currentPresetLabel = computed(() => {
@@ -275,14 +292,22 @@ const currentPresetLabel = computed(() => {
 function onPresetChange(val) {
   if (val === 'fast') {
     searchDepth.value = 15
+    searchMovetimeSec.value = 0.8
     searchMovetime.value = 800
   } else if (val === 'standard') {
     searchDepth.value = 20
+    searchMovetimeSec.value = 1.5
     searchMovetime.value = 1500
   } else if (val === 'master') {
     searchDepth.value = 30
-    searchMovetime.value = 3500
+    searchMovetimeSec.value = 1.5
+    searchMovetime.value = 1500
   }
+  triggerPikafishAnalyze()
+}
+
+function onMovetimeSecChange(val) {
+  searchMovetime.value = Math.round(val * 1000)
   triggerPikafishAnalyze()
 }
 
@@ -315,7 +340,7 @@ const movePairs = computed(() => {
 // 计算明确的红优/黑优多少分
 const redScoreCp = computed(() => {
   if (!engineResult.value || engineResult.value.scoreCp === undefined) return 0
-  // 后端传出的 scoreCp 已经是以红方为绝对基准（正数为红优，负数为黑优）
+  // 后端已经统一归一化为红方基准分 (正为红优，负为黑优)
   return engineResult.value.scoreCp
 })
 
@@ -323,14 +348,14 @@ const isRedAdvantage = computed(() => {
   if (engineResult.value?.sideAdvantageText) {
     return engineResult.value.sideAdvantageText.includes('红优')
   }
-  return redScoreCp.value > 20
+  return redScoreCp.value > 0
 })
 
 const isBlackAdvantage = computed(() => {
   if (engineResult.value?.sideAdvantageText) {
     return engineResult.value.sideAdvantageText.includes('黑优')
   }
-  return redScoreCp.value < -20
+  return redScoreCp.value < 0
 })
 
 const advantageLabel = computed(() => {
@@ -349,7 +374,7 @@ const advantageClass = computed(() => {
   return 'text-balance'
 })
 
-// 平衡指示条样式 (红方在右，黑方在左；红优偏红，黑优偏黑)
+// 平衡指示条样式 (红方在右偏红，黑方在左偏黑)
 const advantageBarStyle = computed(() => {
   const score = redScoreCp.value
   // -1000 ~ +1000 映射为 0% ~ 100%
@@ -636,8 +661,19 @@ function copyFen() {
 
   .custom-slider-box {
     background: #f7f8fa;
-    padding: 8px 12px;
+    padding: 10px 12px;
     border-radius: 6px;
+
+    .slider-row {
+      display: flex;
+      flex-direction: column;
+      &.mt-2 {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px dashed #e4e7ed;
+      }
+    }
+
     .slider-label {
       font-size: 12px;
       color: #606266;
