@@ -24,7 +24,7 @@
           </el-button>
           <el-button
             :type="isAnalysisMode ? 'primary' : 'default'"
-            @click="isAnalysisMode = !isAnalysisMode"
+            @click="toggleAnalysisMode"
           >
             分析模式: {{ isAnalysisMode ? '开启' : '关闭' }}
           </el-button>
@@ -79,6 +79,47 @@
           </el-popover>
         </div>
 
+        <!-- 开局定式谱与开局库开关 -->
+        <div class="opening-setting-group ml-2">
+          <el-popover placement="bottom" :width="320" trigger="click">
+            <template #reference>
+              <el-button size="small" :type="useOpeningBook ? 'success' : 'info'" plain :icon="Reading">
+                开局: {{ selectedOpeningName }} ({{ useOpeningBook ? '库开' : '库关' }})
+              </el-button>
+            </template>
+            <div class="depth-popover-content">
+              <div class="popover-title flex-between">
+                <span>中国象棋开局库设置</span>
+                <el-switch
+                  v-model="useOpeningBook"
+                  active-text="启用"
+                  inactive-text="关闭"
+                  inline-prompt
+                  @change="onOpeningBookToggle"
+                />
+              </div>
+              <div class="tip-text mb-2">启用后开局阶段毫秒级秒出正着；关闭后全部由皮卡鱼引擎深算。</div>
+              <div class="popover-subtitle">快捷选择经典开局定式：</div>
+              <div class="opening-list-scroll">
+                <div
+                  v-for="item in openingPresets"
+                  :key="item.id"
+                  class="opening-item"
+                  :class="{ active: selectedOpeningId === item.id }"
+                  @click="applyOpeningPreset(item)"
+                >
+                  <div class="opening-item-title">
+                    <strong>{{ item.name }}</strong>
+                    <el-tag size="small" effect="plain">{{ item.category }}</el-tag>
+                  </div>
+                  <div class="opening-item-desc">{{ item.description }}</div>
+                  <div class="opening-item-moves">走法: {{ item.movesChinese.join(' ') }}</div>
+                </div>
+              </div>
+            </div>
+          </el-popover>
+        </div>
+
         <!-- 面板展开/收缩控制 -->
         <el-button-group class="ml-2">
           <el-tooltip :content="showMoveTree ? '收起着法谱' : '展开着法谱'" placement="bottom">
@@ -115,7 +156,7 @@
           :selected-pos="selectedPiecePos"
           :legal-moves="legalMoves"
           :last-move="lastMoveHighlight"
-          :suggest-move-uci="engineResult?.bestMove"
+          :suggest-move-uci="isAnalysisMode ? engineResult?.bestMove : ''"
           @cell-click="onBoardCellClick"
         />
 
@@ -128,18 +169,23 @@
           <el-button size="small" :disabled="currentMoveIndex >= historyMoves.length" @click="jumpToMove(historyMoves.length)">最新 》</el-button>
         </div>
 
-        <!-- 局势评估条：纯展示 红优/黑优多少分 -->
+        <!-- 局势评估条：纯展示 红优/黑优多少分 (分析模式关闭时隐藏透视) -->
         <div class="eval-bar-card">
           <div class="eval-info">
             <span class="turn-tag" :class="currentTurn">轮到{{ currentTurn === 'r' ? '红方' : '黑方' }}走</span>
-            <span class="score-text" :class="advantageClass">
-              {{ advantageLabel }}
+            <span class="score-text" :class="isAnalysisMode ? advantageClass : 'text-hidden'">
+              {{ isAnalysisMode ? advantageLabel : '实战盲局中' }}
             </span>
-            <span class="status-desc">{{ engineResult?.advantageDescription || '正在计算局势...' }}</span>
+            <span class="status-desc">
+              {{ isAnalysisMode ? (engineResult?.advantageDescription || '正在计算局势...') : '分析模式已关闭' }}
+            </span>
           </div>
           <!-- 局势平衡度指示条：中立50，红优向右红，黑优向左黑 -->
           <div class="advantage-bar-wrapper">
-            <div class="advantage-bar" :style="advantageBarStyle"></div>
+            <div
+              class="advantage-bar"
+              :style="isAnalysisMode ? advantageBarStyle : { width: '50%', backgroundColor: '#c0c4cc' }"
+            ></div>
           </div>
         </div>
 
@@ -200,7 +246,7 @@
         </div>
 
         <!-- 右下：皮卡鱼引擎分析实时面板 (可折叠收缩) -->
-        <div v-show="showEnginePanel" class="engine-panel-card">
+        <div v-show="showEnginePanel && isAnalysisMode" class="engine-panel-card">
           <div class="engine-header">
             <span class="engine-title">
               <el-icon class="mr-1"><Cpu /></el-icon> 皮卡鱼 Pikafish 实时计算
@@ -218,6 +264,12 @@
               <span class="label">最佳选点:</span>
               <span class="val highlight">{{ engineResult?.bestMoveChinese || '推演中' }}</span>
               <span class="sub-val">({{ engineResult?.bestMove || '--' }})</span>
+              <el-tag v-if="engineResult?.fromBook" size="small" type="success" class="ml-1" effect="dark">
+                开局库
+              </el-tag>
+              <el-tag v-else size="small" type="primary" class="ml-1" effect="plain">
+                皮卡鱼纯算
+              </el-tag>
             </div>
             <div class="data-item">
               <span class="label">分值评估:</span>
@@ -231,9 +283,16 @@
 
           <!-- PV 最佳路径 -->
           <div class="pv-line-box">
-            <span class="pv-label">推荐路线推演：</span>
-            <span class="pv-content">
+            <span class="pv-label">{{ engineResult?.fromBook ? '开局库推荐变例：' : '推荐路线推演：' }}</span>
+            <span class="pv-content" v-if="!engineResult?.fromBook">
               {{ (engineResult?.pvMovesChinese || []).join(' → ') || '等待计算' }}
+            </span>
+            <span class="pv-content" v-else>
+              <template v-for="(bm, bidx) in (engineResult?.bookMoves || []).slice(0, 5)" :key="bm.uci">
+                <el-tag size="small" type="info" class="mr-1 mb-1">
+                  {{ bm.chinese }} ({{ bm.uci }}) 权重:{{ bm.weight }}
+                </el-tag>
+              </template>
             </span>
           </div>
         </div>
@@ -256,7 +315,8 @@ import {
   ArrowDown,
   ArrowUp,
   Close,
-  Setting
+  Setting,
+  Reading
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
@@ -282,6 +342,85 @@ const isAnalysisMode = ref(true)
 const engineSide = ref(null) // 'r', 'b', null
 const isAnalyzing = ref(false)
 const gameOverInfo = ref('') // 绝杀局提示信息
+
+// 开局库控制与定式谱状态
+const useOpeningBook = ref(true)
+const selectedOpeningId = ref('free')
+const selectedOpeningName = ref('自由对局')
+const openingPresets = ref([
+  {
+    id: 'free',
+    name: '自由对局 (标准初始)',
+    category: '标准局',
+    description: '从象棋初始局面开始，开局库根据你的落子自动匹配全部经典变例。',
+    movesChinese: [],
+    movesUci: [],
+    fen: INITIAL_FEN
+  }
+])
+
+async function fetchOpeningPresets() {
+  try {
+    const resp = await axios.get('http://localhost:8080/api/chess/opening-presets')
+    if (resp.data && resp.data.length > 0) {
+      openingPresets.value = [
+        {
+          id: 'free',
+          name: '自由对局 (标准初始)',
+          category: '标准局',
+          description: '从象棋初始局面开始，开局库根据你的落子自动匹配全部经典变例。',
+          movesChinese: [],
+          movesUci: [],
+          fen: INITIAL_FEN
+        },
+        ...resp.data
+      ]
+    }
+  } catch (err) {
+    console.warn('获取开局定式目录失败，使用默认配置:', err)
+  }
+}
+
+function onOpeningBookToggle(val) {
+  ElMessage.info(val ? '已开启开局库（优先秒出经典定式）' : '已关闭开局库（完全由皮卡鱼引擎深算）')
+  triggerPikafishAnalyze()
+}
+
+function applyOpeningPreset(preset) {
+  selectedOpeningId.value = preset.id
+  selectedOpeningName.value = preset.name
+
+  // 重置棋盘至定式局面
+  currentFen.value = preset.fen
+  const parsed = parseFen(preset.fen)
+  boardState.value = parsed.board
+  currentTurn.value = parsed.turn
+
+  // 构建历史步列表
+  const newHistory = []
+  if (preset.movesUci && preset.movesUci.length > 0) {
+    let simFen = INITIAL_FEN
+    for (let i = 0; i < preset.movesUci.length; i++) {
+      const uci = preset.movesUci[i]
+      const ch = preset.movesChinese[i] || uci
+      newHistory.push({
+        uci,
+        chinese: ch,
+        fen: (i === preset.movesUci.length - 1) ? preset.fen : simFen
+      })
+    }
+  }
+  historyMoves.value = newHistory
+  currentMoveIndex.value = newHistory.length
+
+  selectedPiecePos.value = null
+  legalMoves.value = []
+  lastMoveHighlight.value = null
+  gameOverInfo.value = ''
+
+  ElMessage.success(`已摆出经典开局：${preset.name}`)
+  triggerPikafishAnalyze()
+}
 
 // 界面收缩控制
 const showMoveTree = ref(true)
@@ -413,6 +552,7 @@ const advantageBarStyle = computed(() => {
 })
 
 onMounted(() => {
+  fetchOpeningPresets()
   triggerPikafishAnalyze()
 })
 
@@ -507,12 +647,17 @@ function executeMove(from, to) {
 
 // 调度皮卡鱼后端接口分析
 async function triggerPikafishAnalyze() {
+  if (!isAnalysisMode.value) {
+    // 若分析模式关闭，不浪费资源频繁计算分析
+    return
+  }
   isAnalyzing.value = true
   try {
     const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
       fen: currentFen.value,
       depth: searchDepth.value,
-      movetime: searchMovetime.value
+      movetime: searchMovetime.value,
+      useBook: useOpeningBook.value
     })
     engineResult.value = resp.data
   } catch (err) {
@@ -530,7 +675,8 @@ async function triggerEngineBestMove() {
     const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
       fen: currentFen.value,
       depth: searchDepth.value,
-      movetime: searchMovetime.value
+      movetime: searchMovetime.value,
+      useBook: useOpeningBook.value
     })
     engineResult.value = resp.data
 
@@ -637,6 +783,8 @@ function handleNewGame() {
   selectedPiecePos.value = null
   legalMoves.value = []
   lastMoveHighlight.value = null
+  selectedOpeningId.value = 'free'
+  selectedOpeningName.value = '自由对局'
   triggerPikafishAnalyze()
   ElMessage.success('已开启全新棋局')
 }
@@ -647,6 +795,15 @@ function handleAskCoach() {
   }
 }
 
+function toggleAnalysisMode() {
+  isAnalysisMode.value = !isAnalysisMode.value
+  if (isAnalysisMode.value) {
+    ElMessage.success('已开启分析模式：已开启实时选点箭头与局势评分')
+    triggerPikafishAnalyze()
+  } else {
+    ElMessage.info('已关闭分析模式：进入实战盲局对弈，已隐藏走子剧透')
+  }
+}
 function copyFen() {
   navigator.clipboard.writeText(currentFen.value)
   ElMessage.success('FEN 已复制到剪贴板')
@@ -663,15 +820,18 @@ function copyFen() {
 }
 
 .top-toolbar {
-  height: 52px;
+  min-height: 52px;
   background: #ffffff;
   border-bottom: 1px solid #e2e4e8;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 6px 18px;
+  row-gap: 8px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   z-index: 10;
+  flex-shrink: 0;
 
   .logo-area {
     display: flex;
@@ -680,6 +840,7 @@ function copyFen() {
     font-size: 16px;
     font-weight: bold;
     color: #1f2329;
+    flex-shrink: 0;
     .logo-icon {
       font-size: 22px;
     }
@@ -687,11 +848,13 @@ function copyFen() {
 
   .toolbar-buttons {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
   }
 
-  .depth-setting-group {
+  .depth-setting-group,
+  .opening-setting-group {
     display: flex;
     align-items: center;
   }
@@ -835,6 +998,7 @@ function copyFen() {
         &.text-red { color: #f56c6c !important; }
         &.text-black { color: #1d2129 !important; }
         &.text-balance { color: #e6a23c !important; }
+        &.text-hidden { color: #909399 !important; }
       }
       .status-desc {
         color: #909399;
@@ -1028,6 +1192,69 @@ function copyFen() {
       .pv-content {
         color: #606266;
       }
+    }
+  }
+}
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.popover-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 6px;
+}
+
+.opening-list-scroll {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  .opening-item {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: #f8fafc;
+    border: 1px solid #ebeef5;
+    cursor: pointer;
+    transition: all 0.2s;
+
+    &:hover {
+      background: #ecf5ff;
+      border-color: #b3d8ff;
+    }
+
+    &.active {
+      background: #f0f9eb;
+      border-color: #67c23a;
+    }
+
+    .opening-item-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+      font-size: 13px;
+      color: #303133;
+    }
+
+    .opening-item-desc {
+      font-size: 11.5px;
+      color: #909399;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+
+    .opening-item-moves {
+      font-size: 11px;
+      color: #409eff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   }
 }

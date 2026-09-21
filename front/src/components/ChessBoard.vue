@@ -251,6 +251,7 @@ const suggestMoveCoord = computed(() => {
 }
 
 .legal-dot {
+  position: absolute;
   width: 14px;
   height: 14px;
   border-radius: 50%;

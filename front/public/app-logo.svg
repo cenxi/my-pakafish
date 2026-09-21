@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 288" width="288" height="288">
+  <defs>
+    <!-- 背景典雅渐变：深邃国风青黛玄黑 -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="50%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+
+    <!-- 棋子木质/玉质立体渐变 -->
+    <radialGradient id="pieceGrad" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#fff8f0" />
+      <stop offset="45%" stop-color="#faecc8" />
+      <stop offset="85%" stop-color="#dfb776" />
+      <stop offset="100%" stop-color="#b0833e" />
+    </radialGradient>
+
+    <!-- 棋子内圈微凹渐变 -->
+    <radialGradient id="innerGrad" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#fdf3de" />
+      <stop offset="100%" stop-color="#edd29d" />
+    </radialGradient>
+
+    <!-- 楚字朱砂红渐变 -->
+    <linearGradient id="redCharGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444" />
+      <stop offset="100%" stop-color="#991b1b" />
+    </linearGradient>
+
+    <!-- 乾坤太极金环渐变 -->
+    <linearGradient id="goldRing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f5d061" />
+      <stop offset="50%" stop-color="#e6a23c" />
+      <stop offset="100%" stop-color="#cf8a27" />
+    </linearGradient>
+
+    <!-- 投影滤波 -->
+    <filter id="shadowFilter" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.65" />
+    </filter>
+  </defs>
+
+  <!-- 1. 背景 -->
+  <rect width="288" height="288" rx="56" fill="url(#bgGrad)" />
+
+  <!-- 2. 背景棋盘线条细纹装饰 (隐约可见的楚河汉界网格) -->
+  <g stroke="#ffffff" stroke-opacity="0.06" stroke-width="1.5">
+    <line x1="44" y1="94" x2="244" y2="94" />
+    <line x1="44" y1="144" x2="244" y2="144" />
+    <line x1="44" y1="194" x2="244" y2="194" />
+    <line x1="74" y1="44" x2="74" y2="244" />
+    <line x1="144" y1="44" x2="144" y2="244" />
+    <line x1="214" y1="44" x2="214" y2="244" />
+    <!-- 九宫斜线装饰 -->
+    <line x1="74" y1="44" x2="214" y2="184" stroke-dasharray="4,4" />
+    <line x1="214" y1="44" x2="74" y2="184" stroke-dasharray="4,4" />
+  </g>
+
+  <!-- 3. 太极/八卦阵道光环 (纯正象棋弈道神韵，无任何鱼形元素) -->
+  <circle cx="144" cy="144" r="105" fill="none" stroke="url(#goldRing)" stroke-width="2" stroke-dasharray="16, 8, 4, 8" opacity="0.7" />
+  <circle cx="144" cy="144" r="116" fill="none" stroke="#60a5fa" stroke-width="1.2" stroke-dasharray="6, 12" opacity="0.35" />
+
+  <!-- 4. 核心：大象棋子立体厚重感 -->
+  <g filter="url(#shadowFilter)">
+    <!-- 棋子外边框 -->
+    <circle cx="144" cy="144" r="82" fill="url(#pieceGrad)" stroke="#684a28" stroke-width="2.5" />
+    <!-- 棋子侧沿反光圈 -->
+    <circle cx="144" cy="144" r="76" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6" />
+    <!-- 棋子内嵌刻凹槽 -->
+    <circle cx="144" cy="144" r="68" fill="url(#innerGrad)" stroke="#c29955" stroke-width="1.8" />
+  </g>
+
+  <!-- 5. 核心文字：“楚”字（苍劲厚重、魏碑风骨） -->
+  <text x="145" y="166"
+        font-family="'Kaiti', 'STKaiti', 'KaiTi_GB2312', 'SimSun', serif"
+        font-size="66"
+        font-weight="900"
+        fill="#7f1d1d"
+        text-anchor="middle"
+        letter-spacing="1">楚</text>
+  <text x="144" y="164"
+        font-family="'Kaiti', 'STKaiti', 'KaiTi_GB2312', 'SimSun', serif"
+        font-size="66"
+        font-weight="900"
+        fill="url(#redCharGrad)"
+        text-anchor="middle"
+        letter-spacing="1">楚</text>
+
+  <!-- 6. 右下角金石红印：“赢” -->
+  <g transform="translate(182, 172)">
+    <rect x="0" y="0" width="28" height="28" rx="6" fill="#b91c1c" stroke="#fef08a" stroke-width="1.2" />
+    <text x="14" y="20"
+          font-family="'Kaiti', 'STKaiti', sans-serif"
+          font-size="16"
+          font-weight="bold"
+          fill="#fef08a"
+          text-anchor="middle">赢</text>
+  </g>
+</svg>

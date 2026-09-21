@@ -33,4 +33,8 @@ public class EngineAnalysisResult {
     private String advantageDescription;
     /** 明确的红黑优劣描述 (例如: 红优 +180分 或 黑优 +240分 或 双方均势) */
     private String sideAdvantageText;
+    /** 是否命中开局库 */
+    private Boolean fromBook;
+    /** 开局库候选招法列表 (若命中开局库) */
+    private List<BookMove> bookMoves;
 }
