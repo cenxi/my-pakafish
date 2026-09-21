@@ -1107,9 +1107,8 @@ function copyFen() {
   overflow: hidden;
 
   .coach-chat-wrap {
-    flex: 1 1 auto;
-    min-height: 260px;
-    height: 50%;
+    flex: 1 1 0;
+    min-height: 0;
     overflow: hidden;
   }
 

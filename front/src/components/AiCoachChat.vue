@@ -121,23 +121,21 @@ const quickPrompts = [
 function renderMarkdown(content) {
   if (!content) return ''
   try {
-    // 1. 预处理：修复大模型在中文双引号与 ** 嵌套时产生的常见排版格式缺陷
     let text = content
-      // 处理 **“xxx”** 紧贴中文引号导致 marked 判定标点边界失效的情况
+      // 1. 将大模型常输出的 LaTeX 箭头语法 `$\to$` 或 `$\rightarrow$` 转为直观的中文箭头 `→`
+      .replace(/\$\\(to|rightarrow|longrightarrow)\$/g, '→')
+      .replace(/\\(to|rightarrow|longrightarrow)\b/g, '→')
+      // 2. 修复中文双引号与加粗嵌套
       .replace(/\*\*“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
-      // 处理 “**xxx**”
       .replace(/“\*\*([^”\n]+)\*\*”/g, '<strong>“$1”</strong>')
-      // 处理 模型遗漏了开头的 **，只在右引号后面带了 **（例如： “炮1平7”**）
       .replace(/(?<!\*)“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
-      // 处理 流式输出中只输出了前半个 **“xxx” 尚未闭合
       .replace(/\*\*“([^”\n]+)”(?!\*)/g, '<strong>“$1”</strong>')
 
-    // 2. 交给 marked 解析主体语法
+    // 3. 交给 marked 解析主体语法
     let parsed = marked.parse(text)
 
-    // 3. 兜底清除残留的 **
+    // 4. 兜底清除残留的 ** 与残余符号
     parsed = parsed.replace(/\*\*([^*\n<]+)\*\*/g, '<strong>$1</strong>')
-    // 消除流式中偶发单侧裸露的 **
     if (isStreaming.value) {
       parsed = parsed.replace(/\*\*([^*\n<]+)$/, '<strong>$1</strong>')
     }
@@ -235,6 +233,7 @@ function startStreamChat(question) {
   transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
+  box-sizing: border-box;
 
   &.fullscreen {
     position: fixed;
@@ -242,6 +241,8 @@ function startStreamChat(question) {
     right: 20px;
     bottom: 20px;
     left: 20px;
+    height: auto !important;
+    max-height: calc(100vh - 40px);
     z-index: 2000;
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25);
   }
@@ -457,10 +458,33 @@ function startStreamChat(question) {
 }
 
 .chat-footer {
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-top: 1px solid #f2f3f5;
   background: #ffffff;
   flex-shrink: 0;
   box-sizing: border-box;
+  width: 100%;
+
+  :deep(.el-input) {
+    display: flex;
+    width: 100%;
+  }
+
+  :deep(.el-input-group__append) {
+    background-color: #409eff;
+    border-color: #409eff;
+    color: #ffffff;
+    padding: 0 18px;
+
+    .el-button {
+      color: #ffffff;
+      font-weight: 500;
+    }
+  }
+
+  :deep(.el-input__wrapper) {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
 }
 </style>
