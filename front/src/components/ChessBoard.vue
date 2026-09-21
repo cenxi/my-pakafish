@@ -41,16 +41,68 @@
         <line x1="350" y1="750" x2="550" y2="950" stroke="#684a28" stroke-width="2" />
         <line x1="550" y1="750" x2="350" y2="950" stroke="#684a28" stroke-width="2" />
 
-        <!-- 推荐着法高亮指示箭头 (若有皮卡鱼分析) -->
-        <g v-if="suggestMoveCoord" class="suggest-arrow">
+        <!-- 推荐着法高亮指示箭头 (若有皮卡鱼单步分析) -->
+        <g v-if="suggestMoveCoord && (!variationArrows || variationArrows.length === 0)" class="suggest-arrow">
           <line :x1="suggestMoveCoord.x1" :y1="suggestMoveCoord.y1"
                 :x2="suggestMoveCoord.x2" :y2="suggestMoveCoord.y2"
                 stroke="#409EFF" stroke-width="6" stroke-linecap="round" marker-end="url(#arrow)" />
         </g>
+
+        <!-- 连续分支演进箭头组（标有 1, 2, 3... 序号） -->
+        <g v-if="variationArrows && variationArrows.length > 0" class="variation-arrows-group">
+          <template v-for="(arr, idx) in variationArrowCoords" :key="'var-arr-' + idx">
+            <!-- 箭头主体线 -->
+            <line
+              :x1="arr.x1" :y1="arr.y1"
+              :x2="arr.x2" :y2="arr.y2"
+              :stroke="arr.color"
+              stroke-width="5"
+              stroke-linecap="round"
+              :marker-end="`url(#var-arrow-${idx % 4})`"
+            />
+            <!-- 序号气泡底圈 -->
+            <circle
+              :cx="arr.midX" :cy="arr.midY"
+              r="14"
+              :fill="arr.color"
+              stroke="#ffffff"
+              stroke-width="2"
+              filter="url(#numberShadow)"
+            />
+            <!-- 序号数字 -->
+            <text
+              :x="arr.midX" :y="arr.midY + 5"
+              fill="#ffffff"
+              font-size="14"
+              font-weight="bold"
+              text-anchor="middle"
+              font-family="sans-serif"
+            >
+              {{ idx + 1 }}
+            </text>
+          </template>
+        </g>
+
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 1 L 10 5 L 0 9 z" fill="#409EFF" />
           </marker>
+          <!-- 变例箭头专用多色 marker -->
+          <marker id="var-arrow-0" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#e6a23c" />
+          </marker>
+          <marker id="var-arrow-1" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f56c6c" />
+          </marker>
+          <marker id="var-arrow-2" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#67c23a" />
+          </marker>
+          <marker id="var-arrow-3" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#409eff" />
+          </marker>
+          <filter id="numberShadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000000" flood-opacity="0.4" />
+          </filter>
         </defs>
       </svg>
 
@@ -103,7 +155,8 @@ const props = defineProps({
   selectedPos: { type: Object, default: null },
   legalMoves: { type: Array, default: () => [] },
   lastMove: { type: Object, default: null }, // { from: {r,c}, to: {r,c} }
-  suggestMoveUci: { type: String, default: '' } // 如 b2e2
+  suggestMoveUci: { type: String, default: '' }, // 如 b2e2
+  variationArrows: { type: Array, default: () => [] } // [ { from: {r,c}, to: {r,c} } ]
 })
 
 const emit = defineEmits(['cell-click'])
@@ -176,6 +229,37 @@ const suggestMoveCoord = computed(() => {
   const p1 = getPos(fr, fc)
   const p2 = getPos(tr, tc)
   return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
+})
+
+// 计算连续分支箭头坐标列表 (标号 1, 2, 3...)
+const colorPalette = ['#e6a23c', '#f56c6c', '#67c23a', '#409eff', '#909399']
+const variationArrowCoords = computed(() => {
+  if (!props.variationArrows || props.variationArrows.length === 0) return []
+  const getPos = (r, c) => {
+    const dispR = props.isFlipped ? r : (9 - r)
+    const dispC = props.isFlipped ? (8 - c) : c
+    return {
+      x: 50 + dispC * 100,
+      y: 50 + dispR * 100
+    }
+  }
+
+  return props.variationArrows.map((mv, idx) => {
+    const p1 = getPos(mv.from.r, mv.from.c)
+    const p2 = getPos(mv.to.r, mv.to.c)
+    const midX = Math.round((p1.x + p2.x) / 2)
+    const midY = Math.round((p1.y + p2.y) / 2)
+    const color = colorPalette[idx % colorPalette.length]
+    return {
+      x1: p1.x,
+      y1: p1.y,
+      x2: p2.x,
+      y2: p2.y,
+      midX,
+      midY,
+      color
+    }
+  })
 })
 </script>
 

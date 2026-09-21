@@ -37,7 +37,7 @@
             <span>特级大师 · 棋理精解</span>
           </div>
           <!-- Markdown 渲染气泡 -->
-          <div class="markdown-body text-bubble" v-html="renderMarkdown(msg.text)"></div>
+          <div class="markdown-body text-bubble" @click="handleBubbleClick" v-html="renderMarkdown(msg.text)"></div>
         </div>
       </div>
 
@@ -96,8 +96,11 @@ const props = defineProps({
   currentFen: { type: String, required: true },
   latestMoveChinese: { type: String, default: '' },
   historyText: { type: String, default: '' },
-  engineAnalysis: { type: Object, default: null }
+  engineAnalysis: { type: Object, default: null },
+  historyMoves: { type: Array, default: () => [] }
 })
+
+const emit = defineEmits(['jump-step', 'play-variation'])
 
 const inputQuery = ref('')
 const isStreaming = ref(false)
@@ -122,27 +125,62 @@ function renderMarkdown(content) {
   if (!content) return ''
   try {
     let text = content
-      // 1. 将大模型常输出的 LaTeX 箭头语法 `$\to$` 或 `$\rightarrow$` 转为直观的中文箭头 `→`
+      // 1. 修复大模型生成的标题缺少空格问题 (如 `###二、` -> `### 二、`)，防止 marked 无法识别为标题
+      .replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2')
+      // 2. 将大模型常输出的 LaTeX 箭头语法 `$\to$` 或 `$\rightarrow$` 转为直观的中文箭头 `→`
       .replace(/\$\\(to|rightarrow|longrightarrow)\$/g, '→')
       .replace(/\\(to|rightarrow|longrightarrow)\b/g, '→')
-      // 2. 修复中文双引号与加粗嵌套
+      // 3. 修复各种中文引号与加粗语法粘连缺陷
+      // 3.1 完整闭合的 **“xxx”** 或 “**xxx**”
       .replace(/\*\*“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
       .replace(/“\*\*([^”\n]+)\*\*”/g, '<strong>“$1”</strong>')
+      // 3.2 开头带 ** 但中间包含引号，冒号后闭合 (如 `**切忌“单兵深入，后防空虚”：七路马` 或漏掉右侧 **)
+      .replace(/\*\*([^：:\n*]+[：:])([^*]+)\*\*/g, '<strong>$1</strong>$2')
+      // 3.3 引号与星号错位，例如 `**切忌“xxx”**` 或 `**“xxx”`
       .replace(/(?<!\*)“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
       .replace(/\*\*“([^”\n]+)”(?!\*)/g, '<strong>“$1”</strong>')
 
-    // 3. 交给 marked 解析主体语法
+    // 4. 将带有推演箭头的长分支标记为可点击推演按钮 (例如：“▶ 车六退二 → 车6进8...” 或 “车六退二 → 车6进8...”)
+    text = text.replace(/(?:“)?(?:[▶►]\s*)?([车馬马炮砲兵卒相象士仕帥帅將将][一二三四五六七八九123456789][进退平][一二三四五六七八九123456789](?:\s*→\s*[车馬马炮砲兵卒相象士仕帥帅將将][一二三四五六七八九123456789][进退平][一二三四五六七八九123456789])+)(?:”)?/g,
+      '<button type="button" class="variation-replay-btn" data-variation="$1" title="点击在棋盘上动态演示并标注此演进路线"><span class="replay-icon">▶</span><span class="replay-text">$1</span><span class="replay-badge">演进推演</span></button>'
+    )
+
+    // 5. 将具体的“第 X 回合/第 X 步”历史棋步转化为可跳转链接
+    text = text.replace(/(第\s*(\d+)\s*(?:回合|步)(?:\s*[红黑]方走[车馬马炮砲兵卒相象士仕帥帅將将][一二三四五六七八九123456789][进退平][一二三四五六七八九123456789])?)/g,
+      '<button type="button" class="step-jump-btn" data-step="$2" title="点击棋盘立即回溯至第 $2 步"><span class="btn-icon">🎯</span><span class="btn-text">$1</span><span class="btn-action">跳转</span></button>'
+    )
+
+    // 6. 交给 marked 解析主体语法
     let parsed = marked.parse(text)
 
-    // 4. 兜底清除残留的 ** 与残余符号
+    // 7. 清理残留孤立未闭合的 **
+    // 7.1 成对 **xxx** -> <strong>xxx</strong>
     parsed = parsed.replace(/\*\*([^*\n<]+)\*\*/g, '<strong>$1</strong>')
-    if (isStreaming.value) {
-      parsed = parsed.replace(/\*\*([^*\n<]+)$/, '<strong>$1</strong>')
-    }
+    // 7.2 单个未闭合的 **（大模型只输出了开头的 **切忌... 却没有输后半个 **）
+    parsed = parsed.replace(/\*\*([^*\n<]{1,40}?)(?=[:：，。！？\s<]|$)/g, '<strong>$1</strong>')
+    // 7.3 去除多余悬空的 **
+    parsed = parsed.replace(/\*\*/g, '')
 
     return parsed
   } catch (e) {
     return content
+  }
+}
+
+function handleBubbleClick(e) {
+  const target = e.target.closest('.step-jump-btn, .step-jump-link, .variation-replay-btn')
+  if (!target) return
+
+  if (target.classList.contains('step-jump-btn') || target.classList.contains('step-jump-link')) {
+    const stepNum = parseInt(target.getAttribute('data-step'), 10)
+    if (!isNaN(stepNum)) {
+      emit('jump-step', stepNum)
+    }
+  } else if (target.classList.contains('variation-replay-btn')) {
+    const variationStr = target.getAttribute('data-variation')
+    if (variationStr) {
+      emit('play-variation', variationStr)
+    }
   }
 }
 
@@ -418,6 +456,150 @@ function startStreamChat(question) {
   }
   h3 { font-size: 15px; }
   h4 { font-size: 14px; }
+
+  :deep(.step-jump-btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #eef5ff;
+    color: #165dff;
+    border: 1px solid #bedaff;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    vertical-align: middle;
+    margin: 2px 4px;
+    outline: none;
+    box-shadow: 0 1px 3px rgba(22, 93, 255, 0.1);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+
+    .btn-icon {
+      font-size: 13px;
+      line-height: 1;
+    }
+
+    .btn-text {
+      font-weight: 600;
+      color: #165dff;
+    }
+
+    .btn-action {
+      font-size: 11px;
+      background: #165dff;
+      color: #ffffff;
+      padding: 0 4px;
+      border-radius: 3px;
+      line-height: 1.4;
+      margin-left: 2px;
+      opacity: 0.85;
+    }
+
+    &:hover {
+      background: #165dff;
+      border-color: #165dff;
+      color: #ffffff;
+      transform: translateY(-1.5px);
+      box-shadow: 0 3px 8px rgba(22, 93, 255, 0.35);
+
+      .btn-text {
+        color: #ffffff;
+      }
+      .btn-action {
+        background: #ffffff;
+        color: #165dff;
+        opacity: 1;
+      }
+    }
+
+    &:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 2px rgba(22, 93, 255, 0.2);
+    }
+  }
+
+  :deep(.step-jump-link) {
+    display: inline-flex;
+    align-items: center;
+    background: #e8f3ff;
+    color: #165dff;
+    border: 1px solid #b3d8ff;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 13px;
+    margin: 0 3px;
+    transition: all 0.2s;
+
+    &:hover {
+      background: #165dff;
+      color: #ffffff;
+      transform: translateY(-1px);
+      box-shadow: 0 2px 6px rgba(22, 93, 255, 0.3);
+    }
+  }
+
+  :deep(.variation-replay-btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #fdf6ec;
+    color: #b8741a;
+    border: 1.5px solid #f3d19e;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    margin: 4px 2px;
+    outline: none;
+    box-shadow: 0 1.5px 4px rgba(230, 162, 60, 0.15);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    vertical-align: middle;
+
+    .replay-icon {
+      font-size: 12px;
+      color: #e6a23c;
+    }
+
+    .replay-text {
+      color: #8c5b00;
+      font-weight: 600;
+    }
+
+    .replay-badge {
+      font-size: 11px;
+      background: #e6a23c;
+      color: #ffffff;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+
+    &:hover {
+      background: #e6a23c;
+      border-color: #e6a23c;
+      color: #ffffff;
+      transform: translateY(-1.5px);
+      box-shadow: 0 4px 12px rgba(230, 162, 60, 0.35);
+
+      .replay-icon,
+      .replay-text {
+        color: #ffffff;
+      }
+      .replay-badge {
+        background: #ffffff;
+        color: #e6a23c;
+      }
+    }
+
+    &:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 2px rgba(230, 162, 60, 0.2);
+    }
+  }
 }
 
 .streaming-indicator {

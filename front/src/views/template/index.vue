@@ -157,11 +157,27 @@
           :legal-moves="legalMoves"
           :last-move="lastMoveHighlight"
           :suggest-move-uci="isAnalysisMode ? engineResult?.bestMove : ''"
+          :variation-arrows="activeVariationArrows"
           @cell-click="onBoardCellClick"
         />
 
+        <!-- 分支推演演播控制器 (推演变例时弹出，可随时逐步前进、后退、或一键还原原盘面) -->
+        <transition name="el-zoom-in-top">
+          <div v-if="isVariationMode" class="variation-player-bar">
+            <div class="player-left">
+              <span class="player-tag">演进推演中</span>
+              <span class="player-progress">步骤 {{ variationStepIndex }} / {{ variationSteps.length }}</span>
+            </div>
+            <div class="player-controls">
+              <el-button size="small" :disabled="variationStepIndex <= 0" @click="stepVariation(-1)">〈 回退一步</el-button>
+              <el-button size="small" type="primary" :disabled="variationStepIndex >= variationSteps.length" @click="stepVariation(1)">走下一步 〉</el-button>
+              <el-button size="small" type="danger" plain @click="exitVariationMode">❌ 退出并还原原局面</el-button>
+            </div>
+          </div>
+        </transition>
+
         <!-- 步进控制按钮 -->
-        <div class="step-controls">
+        <div class="step-controls" v-show="!isVariationMode">
           <el-button size="small" :disabled="currentMoveIndex <= 0" @click="jumpToMove(0)">《 开始</el-button>
           <el-button size="small" :disabled="currentMoveIndex <= 0" @click="stepMove(-1)">〈 上一步</el-button>
           <span class="step-text">{{ currentMoveIndex }} / {{ historyMoves.length }}</span>
@@ -242,6 +258,9 @@
             :latest-move-chinese="latestMoveChinese"
             :history-text="historyFullText"
             :engine-analysis="engineResult"
+            :history-moves="historyMoves"
+            @jump-step="onCoachJumpStep"
+            @play-variation="onCoachPlayVariation"
           />
         </div>
 
@@ -422,7 +441,158 @@ function applyOpeningPreset(preset) {
   triggerPikafishAnalyze()
 }
 
-// 界面收缩控制
+// 导师复盘点击历史步跳转 (如点击 "第3回合" -> 跳到第 3 回合)
+function onCoachJumpStep(stepNum) {
+  // 如果输入的是回合数（如第3回合红方走子，对应索引为 (stepNum-1)*2+1 或 stepNum*2）
+  let targetIndex = stepNum
+  if (stepNum <= Math.ceil(historyMoves.value.length / 2)) {
+    // 优先作为回合数匹配
+    targetIndex = (stepNum - 1) * 2 + 1
+  }
+  targetIndex = Math.min(targetIndex, historyMoves.value.length)
+  jumpToMove(targetIndex)
+  ElMessage.info(`已切换至第 ${stepNum} 回合盘面`)
+}
+
+// 分支推演状态机
+const isVariationMode = ref(false)
+const variationSteps = ref([])
+const variationStepIndex = ref(0)
+const savedSnapshotBeforeVariation = ref(null)
+const activeVariationArrows = ref([])
+
+// 导师复盘点击变例推演播放器 (如点击 "▶ 炮二平五 → 马8进7 → 车一平二")
+function onCoachPlayVariation(variationText) {
+  // 过滤掉开头结尾的引号、符号与“演进推演”文字
+  let clean = variationText.replace(/[“”（）()▶►]/g, '').replace(/演进推演/g, '').trim()
+  const rawMoves = clean.split('→').map(m => m.trim()).filter(Boolean)
+  if (rawMoves.length === 0) return
+
+  // 1. 保存进入推演前的原始盘面快照
+  savedSnapshotBeforeVariation.value = {
+    fen: currentFen.value,
+    moveIndex: currentMoveIndex.value,
+    history: [...historyMoves.value],
+    lastHighlight: lastMoveHighlight.value
+  }
+
+  // 2. 模拟试走并计算全部步骤的起点和终点
+  const parsedSteps = []
+  const arrowList = []
+  let simBoard = parseFen(currentFen.value).board
+  let simTurn = parseFen(currentFen.value).turn
+
+  for (const chMove of rawMoves) {
+    const legalFound = findMoveByChinese(simBoard, simTurn, chMove)
+    if (legalFound) {
+      arrowList.push({ from: legalFound.from, to: legalFound.to })
+      parsedSteps.push({
+        chinese: chMove,
+        from: legalFound.from,
+        to: legalFound.to
+      })
+      const piece = simBoard[legalFound.from.r][legalFound.from.c]
+      simBoard[legalFound.to.r][legalFound.to.c] = piece
+      simBoard[legalFound.from.r][legalFound.from.c] = null
+      simTurn = simTurn === 'r' ? 'b' : 'r'
+    } else {
+      console.warn('分支招法在推演局面中未匹配:', chMove)
+    }
+  }
+
+  if (arrowList.length === 0) {
+    ElMessage.warning('未能匹配到当前局面下的合法走法路线，请先跳转到对应局面再点击推演')
+    return
+  }
+
+  // 3. 激活推演模式并在棋盘上画出序号 1, 2, 3... 箭头
+  isVariationMode.value = true
+  variationSteps.value = parsedSteps
+  variationStepIndex.value = 0
+  activeVariationArrows.value = arrowList
+
+  ElMessage.success(`已在棋盘绘制全部 ${arrowList.length} 步演进路线（标有序号 1, 2...），可点击控制条逐步拆解`)
+}
+
+// 逐步演进：前进或后退一步（纯推演沙盒，绝不写入对局真实历史谱）
+function stepVariation(delta) {
+  const target = variationStepIndex.value + delta
+  if (target < 0 || target > variationSteps.value.length) return
+
+  // 每次演进都基于推演开始时的原始盘面重新模拟至目标步
+  const baseFen = savedSnapshotBeforeVariation.value.fen
+  const p = parseFen(baseFen)
+  let curBoard = p.board
+  let curTurn = p.turn
+  let lastFrom = null
+  let lastTo = null
+
+  for (let i = 0; i < target; i++) {
+    const s = variationSteps.value[i]
+    const piece = curBoard[s.from.r][s.from.c]
+    curBoard[s.to.r][s.to.c] = piece
+    curBoard[s.from.r][s.from.c] = null
+    curTurn = curTurn === 'r' ? 'b' : 'r'
+    lastFrom = s.from
+    lastTo = s.to
+  }
+
+  boardState.value = curBoard
+  currentTurn.value = curTurn
+  currentFen.value = boardToFen(curBoard, curTurn)
+  lastMoveHighlight.value = (lastFrom && lastTo) ? { from: lastFrom, to: lastTo } : null
+  selectedPiecePos.value = null
+  legalMoves.value = []
+  variationStepIndex.value = target
+
+  triggerPikafishAnalyze()
+}
+
+// 退出演进推演，一键还原原棋局
+function exitVariationMode() {
+  if (!savedSnapshotBeforeVariation.value) return
+  const snap = savedSnapshotBeforeVariation.value
+  historyMoves.value = snap.history
+  currentMoveIndex.value = snap.moveIndex
+  currentFen.value = snap.fen
+  const p = parseFen(snap.fen)
+  boardState.value = p.board
+  currentTurn.value = p.turn
+  lastMoveHighlight.value = snap.lastHighlight
+  selectedPiecePos.value = null
+  legalMoves.value = []
+
+  // 退出推演状态并清空箭头
+  isVariationMode.value = false
+  variationSteps.value = []
+  variationStepIndex.value = 0
+  activeVariationArrows.value = []
+  savedSnapshotBeforeVariation.value = null
+
+  triggerPikafishAnalyze()
+  ElMessage.info('已退出推演，已完整恢复原始对局与棋谱')
+}
+
+// 辅助函数：根据中文招法在当前棋盘中匹配对应的走法
+function findMoveByChinese(board, turn, chinese) {
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = board[r][c]
+      if (p && p.color === turn) {
+        const moves = getLegalMoves(board, r, c)
+        for (const m of moves) {
+          const uci = `${String.fromCharCode(97 + c)}${r}${String.fromCharCode(97 + m.c)}${m.r}`
+          const curFen = boardToFen(board, turn)
+          const name = uciToChinese(curFen, uci)
+          if (name === chinese || name.replace(/\s+/g, '') === chinese.replace(/\s+/g, '')) {
+            return { from: { r, c }, to: { r: m.r, c: m.c } }
+          }
+        }
+      }
+    }
+  }
+  return null
+}
 const showMoveTree = ref(true)
 const showEnginePanel = ref(true)
 
@@ -949,6 +1119,47 @@ function copyFen() {
       color: #cf3d00;
       font-size: 13.5px;
       flex: 1;
+    }
+  }
+
+  // 演进推演条样式
+  .variation-player-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #fdf6ec;
+    border: 1px solid #f3d19e;
+    border-radius: 6px;
+    padding: 6px 12px;
+    width: 100%;
+    box-sizing: border-box;
+    box-shadow: 0 2px 8px rgba(230, 162, 60, 0.2);
+
+    .player-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+
+      .player-tag {
+        font-size: 11.5px;
+        background: #e6a23c;
+        color: #ffffff;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-weight: bold;
+      }
+
+      .player-progress {
+        font-size: 13px;
+        font-weight: bold;
+        color: #8c5b00;
+      }
+    }
+
+    .player-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
   }
 
