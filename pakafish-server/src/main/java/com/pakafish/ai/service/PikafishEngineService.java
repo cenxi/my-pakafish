@@ -189,15 +189,19 @@ public class PikafishEngineService {
                     result.setScoreCp(redScore);
 
                     String sideText;
+                    String statusDesc;
                     if (redScore == 0) {
                         sideText = "均势 (0分)";
+                        statusDesc = "局势胶着，均势抗衡";
                     } else if (redScore > 0) {
                         sideText = "红优 +" + redScore + "分";
+                        statusDesc = formatAdvantageText(redScore, "红方");
                     } else {
                         sideText = "黑优 +" + Math.abs(redScore) + "分";
+                        statusDesc = formatAdvantageText(Math.abs(redScore), "黑方");
                     }
                     result.setSideAdvantageText(sideText);
-                    result.setAdvantageDescription(formatAdvantage(redScore));
+                    result.setAdvantageDescription(statusDesc);
                 }
 
                 return result;
@@ -214,21 +218,15 @@ public class PikafishEngineService {
         return Math.round(winRate * 1000.0) / 10.0;
     }
 
-    private String formatAdvantage(int cp) {
-        if (Math.abs(cp) <= 50) {
-            return "势均力敌，局势胶着";
-        } else if (cp > 50 && cp <= 200) {
-            return "当前方稍占主动";
-        } else if (cp > 200 && cp <= 600) {
-            return "当前方握有明显优势";
-        } else if (cp > 600) {
-            return "当前方胜券在握 (胜势)";
-        } else if (cp < -50 && cp >= -200) {
-            return "当前方略处下风";
-        } else if (cp < -200 && cp >= -600) {
-            return "当前方明显被动";
+    private String formatAdvantageText(int score, String dominantSide) {
+        if (score <= 50) {
+            return dominantSide + "稍占主动";
+        } else if (score <= 200) {
+            return dominantSide + "握有微弱优势";
+        } else if (score <= 600) {
+            return dominantSide + "握有明显优势";
         } else {
-            return "当前方面临败局 (严重劣势)";
+            return dominantSide + "胜券在握 (胜势)";
         }
     }
 

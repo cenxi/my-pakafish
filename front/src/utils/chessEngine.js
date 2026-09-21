@@ -111,7 +111,10 @@ export function uciToChinese(fen, uci) {
   return `${name}${srcColStr}${action}${destStr}`
 }
 
-export function getLegalMoves(board, r, c) {
+/**
+ * 基础伪合法走子探测
+ */
+export function getPseudoLegalMoves(board, r, c) {
   const piece = board[r][c]
   if (!piece) return []
   const moves = []
@@ -137,6 +140,7 @@ export function getLegalMoves(board, r, c) {
           moves.push({ r: nr, c: nc })
         }
       }
+      // 将帅照面直接飞将
       const step = isRed ? 1 : -1
       let faceR = r + step
       while (faceR >= 0 && faceR <= 9) {
@@ -262,4 +266,90 @@ export function getLegalMoves(board, r, c) {
   }
 
   return moves
+}
+
+/**
+ * 校验某方老将是否正在被将军（或两将对脸）
+ */
+export function isKingInCheck(board, color) {
+  // 1. 找到该方将/帅的位置
+  let kr = -1, kc = -1
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = board[r][c]
+      if (p && p.type === 'k' && p.color === color) {
+        kr = r
+        kc = c
+        break
+      }
+    }
+    if (kr !== -1) break
+  }
+
+  if (kr === -1) return true // 老将都没了，直接处于死局
+
+  const opponentColor = color === 'r' ? 'b' : 'r'
+
+  // 2. 检查敌方所有棋子的攻击范围是否覆盖了老将 (kr, kc)
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = board[r][c]
+      if (p && p.color === opponentColor) {
+        const moves = getPseudoLegalMoves(board, r, c)
+        if (moves.some(m => m.r === kr && m.c === kc)) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * 真正合法的走法：伪走后老将不能处于被将军状态
+ */
+export function getLegalMoves(board, r, c) {
+  const piece = board[r][c]
+  if (!piece) return []
+
+  const pseudoMoves = getPseudoLegalMoves(board, r, c)
+  const legalMoves = []
+
+  for (const mv of pseudoMoves) {
+    // 模拟走一步
+    const originalDest = board[mv.r][mv.c]
+    board[mv.r][mv.c] = piece
+    board[r][c] = null
+
+    // 检查走完后自己老将是否依然受攻
+    const inCheck = isKingInCheck(board, piece.color)
+
+    // 还原棋盘
+    board[r][c] = piece
+    board[mv.r][mv.c] = originalDest
+
+    if (!inCheck) {
+      legalMoves.push(mv)
+    }
+  }
+
+  return legalMoves
+}
+
+/**
+ * 检查当前方是否已经被绝杀（无路可走）
+ */
+export function isCheckmate(board, turnColor) {
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = board[r][c]
+      if (p && p.color === turnColor) {
+        const moves = getLegalMoves(board, r, c)
+        if (moves.length > 0) {
+          return false // 还有合法的棋能走，未被绝杀
+        }
+      }
+    }
+  }
+  return true // 该方已无任何合法棋步，判定绝杀（胜负已分）
 }

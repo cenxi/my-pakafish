@@ -42,7 +42,7 @@ public class ChessCoachChatService {
     /**
      * 流式解答用户的棋局提问或局势分析请求
      */
-    public void streamChat(String fen, String userQuestion, SseEmitter emitter) {
+    public void streamChat(String fen, String history, String userQuestion, SseEmitter emitter) {
         // 1. 调用皮卡鱼引擎快速分析局面
         EngineAnalysisResult engineResult = pikafishEngineService.analyzePosition(fen, 1500);
 
@@ -52,15 +52,15 @@ public class ChessCoachChatService {
             engineResult.setPvMovesChinese(coordinateConverter.convertMoveList(fen, engineResult.getPvMoves()));
         }
 
-        // 3. 构建 Prompt 事实上下文
-        String context = buildContext(fen, engineResult);
+        // 3. 构建 Prompt 事实上下文 (注入完整的开局对局棋谱)
+        String context = buildContext(fen, history, engineResult);
         String promptContent = String.format("""
             %s
             
             【学员提问/诉求】：%s
             
-            请作为特级大师教练，结合上述局面特征与引擎客观数据，对学员进行指导与解答：
-            """, context, (userQuestion == null || userQuestion.isBlank()) ? "请全面分析当前局势，并为我讲解最佳走法的思路与后续计划。" : userQuestion);
+            请作为特级大师教练，结合上述整盘对局历史、当前盘面与皮卡鱼客观深度算力，为学员进行专业全面的复盘、思路剖析与战术解答：
+            """, context, (userQuestion == null || userQuestion.isBlank()) ? "请结合整盘历史与当前盘面，全面复盘局势并讲解最佳应对计划。" : userQuestion);
 
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(SystemMessage.from(SYSTEM_PROMPT));
@@ -101,18 +101,27 @@ public class ChessCoachChatService {
         });
     }
 
-    private String buildContext(String fen, EngineAnalysisResult res) {
-        boolean isRed = fen.contains(" w ") ? false : true; // 象棋FEN通常用 w表示红(先), b表示黑(后)
+    private String buildContext(String fen, String history, EngineAnalysisResult res) {
+        boolean isRed = !fen.contains(" b ");
         StringBuilder sb = new StringBuilder();
-        sb.append("【当前棋盘状态】\n");
-        sb.append("- FEN: ").append(fen).append("\n");
+
+        // 注入整盘历史对局谱
+        sb.append("【整盘对局历史谱（从第1回合到当前）】\n");
+        if (history != null && !history.isBlank()) {
+            sb.append(history).append("\n");
+        } else {
+            sb.append("（刚开局，尚无历史着法）\n");
+        }
+
+        sb.append("\n【当前最新棋盘状态】\n");
         sb.append("- 轮到走子方: ").append(isRed ? "红方" : "黑方").append("\n");
+        sb.append("- FEN 坐标状态: ").append(fen).append("\n");
 
         if (res != null) {
-            sb.append("\n【皮卡鱼引擎客观计算】\n");
-            sb.append("- 局势评估: ").append(res.getAdvantageDescription()).append("\n");
+            sb.append("\n【皮卡鱼引擎客观计算事实】\n");
+            sb.append("- 局势评语: ").append(res.getSideAdvantageText()).append(" (").append(res.getAdvantageDescription()).append(")\n");
             sb.append("- 评估分(cp): ").append(res.getScoreCp()).append("，当前胜率估算约: ").append(res.getWinRate()).append("%\n");
-            sb.append("- 引擎推荐最佳走法: ").append(res.getBestMoveChinese()).append(" (").append(res.getBestMove()).append(")\n");
+            sb.append("- 引擎推荐当前最佳应对: ").append(res.getBestMoveChinese()).append(" (").append(res.getBestMove()).append(")\n");
             if (res.getPvMovesChinese() != null && !res.getPvMovesChinese().isEmpty()) {
                 sb.append("- 引擎推荐后续深度推演: ").append(String.join(" -> ", res.getPvMovesChinese())).append("\n");
             }

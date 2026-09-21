@@ -107,7 +107,7 @@
 
     <!-- 2. 主体工作区 -->
     <div class="main-workspace">
-      <!-- 左列：棋盘 + 步进控制 + 局势优劣条 -->
+      <!-- 左列：棋盘 + 步进控制 + 局势优劣条 + 绝杀提示 (移至下方) -->
       <section class="left-board-col">
         <ChessBoard
           :board="boardState"
@@ -142,6 +142,15 @@
             <div class="advantage-bar" :style="advantageBarStyle"></div>
           </div>
         </div>
+
+        <!-- 绝杀提示横幅 (放置在左列最下方，绝不顶起棋盘和控制条) -->
+        <transition name="el-zoom-in-bottom">
+          <div v-if="gameOverInfo" class="checkmate-banner">
+            <span class="banner-icon">⚔️</span>
+            <span class="banner-text">{{ gameOverInfo }}</span>
+            <el-button size="small" type="danger" round @click="handleNewGame">再来一局</el-button>
+          </div>
+        </transition>
       </section>
 
       <!-- 中列：着法记录树 (可收起) -->
@@ -185,6 +194,7 @@
             ref="aiCoachRef"
             :current-fen="currentFen"
             :latest-move-chinese="latestMoveChinese"
+            :history-text="historyFullText"
             :engine-analysis="engineResult"
           />
         </div>
@@ -258,7 +268,9 @@ import {
   parseFen,
   boardToFen,
   getLegalMoves,
-  uciToChinese
+  uciToChinese,
+  isCheckmate,
+  isKingInCheck
 } from '@/utils/chessEngine'
 
 // 状态
@@ -269,6 +281,7 @@ const isFlipped = ref(false)
 const isAnalysisMode = ref(true)
 const engineSide = ref(null) // 'r', 'b', null
 const isAnalyzing = ref(false)
+const gameOverInfo = ref('') // 绝杀局提示信息
 
 // 界面收缩控制
 const showMoveTree = ref(true)
@@ -335,6 +348,19 @@ const movePairs = computed(() => {
     })
   }
   return pairs
+})
+
+// 拼接整盘走子历史文本 (如: 1. 炮二平五 马8进7; 2. 兵七进一 ...)
+const historyFullText = computed(() => {
+  if (historyMoves.value.length === 0) return ''
+  const lines = []
+  for (let i = 0; i < historyMoves.value.length; i += 2) {
+    const round = Math.floor(i / 2) + 1
+    const rMove = historyMoves.value[i]?.chinese || ''
+    const bMove = historyMoves.value[i + 1]?.chinese || ''
+    lines.push(`${round}. ${rMove}  ${bMove}`.trim())
+  }
+  return lines.join('\n')
 })
 
 // 计算明确的红优/黑优多少分
@@ -451,6 +477,24 @@ function executeMove(from, to) {
   historyMoves.value.push({ uci, chinese, fen: newFen })
   currentMoveIndex.value = historyMoves.value.length
 
+  // 4. 判定是否已进入绝杀局 (胜负已分)
+  const isMated = isCheckmate(boardState.value, currentTurn.value)
+  if (isMated) {
+    const winnerName = moveTurn === 'r' ? '红方' : '黑方'
+    const loserName = currentTurn.value === 'r' ? '红方' : '黑方'
+    const tip = `绝杀！${winnerName}胜！${loserName}无路可走。`
+    gameOverInfo.value = tip
+    ElMessage.success({
+      message: tip,
+      duration: 5000,
+      showClose: true
+    })
+    triggerPikafishAnalyze()
+    return // 绝杀后终止引擎走棋
+  } else {
+    gameOverInfo.value = ''
+  }
+
   // 如果轮到引擎执子，直接让引擎计算并落子（不再重复发起纯分析）
   if (engineSide.value && engineSide.value === currentTurn.value) {
     setTimeout(() => {
@@ -554,6 +598,16 @@ function jumpToMove(index) {
   selectedPiecePos.value = null
   legalMoves.value = []
 
+  // 检查当前步是否绝杀
+  const isMated = isCheckmate(boardState.value, currentTurn.value)
+  if (isMated && index > 0) {
+    const winnerName = currentTurn.value === 'r' ? '黑方' : '红方'
+    const loserName = currentTurn.value === 'r' ? '红方' : '黑方'
+    gameOverInfo.value = `绝杀！${winnerName}胜！${loserName}无路可走。`
+  } else {
+    gameOverInfo.value = ''
+  }
+
   if (index > 0) {
     const lastMoveItem = historyMoves.value[index - 1]
     const uci = lastMoveItem.uci
@@ -574,6 +628,7 @@ function jumpToMove(index) {
 }
 
 function handleNewGame() {
+  gameOverInfo.value = ''
   currentFen.value = INITIAL_FEN
   boardState.value = parseFen(INITIAL_FEN).board
   currentTurn.value = 'r'
@@ -708,6 +763,31 @@ function copyFen() {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  position: relative;
+
+  .checkmate-banner {
+    width: 100%;
+    background: linear-gradient(135deg, #ffefe6 0%, #ffe0d1 100%);
+    border: 1px solid #f9905c;
+    border-radius: 8px;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    box-shadow: 0 4px 12px rgba(249, 144, 92, 0.2);
+
+    .banner-icon {
+      font-size: 18px;
+      margin-right: 6px;
+    }
+    .banner-text {
+      font-weight: bold;
+      color: #cf3d00;
+      font-size: 13.5px;
+      flex: 1;
+    }
+  }
 
   .step-controls {
     display: flex;

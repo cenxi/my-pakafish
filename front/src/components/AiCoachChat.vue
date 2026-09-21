@@ -30,16 +30,6 @@
 
     <!-- 消息对话区域 -->
     <div ref="chatBodyRef" class="chat-body">
-      <!-- 欢迎语与当前局面概况 -->
-      <div class="welcome-card">
-        <div class="card-title">
-          <el-icon><InfoFilled /></el-icon> 执局辅导大师
-        </div>
-        <p>
-          棋手你好！我是你的 AI 象棋导师。我会结合<strong>皮卡鱼引擎客观计算（胜率分、变着深度）</strong>为你剖析核心战局，解释每一步背后的棋理与潜在反击。
-        </p>
-      </div>
-
       <!-- 消息列表 -->
       <div v-for="(msg, idx) in messageList" :key="idx" class="message-row" :class="msg.role">
         <div class="message-content">
@@ -105,6 +95,7 @@ marked.setOptions({
 const props = defineProps({
   currentFen: { type: String, required: true },
   latestMoveChinese: { type: String, default: '' },
+  historyText: { type: String, default: '' },
   engineAnalysis: { type: Object, default: null }
 })
 
@@ -130,11 +121,26 @@ const quickPrompts = [
 function renderMarkdown(content) {
   if (!content) return ''
   try {
-    let parsed = marked.parse(content)
+    // 1. 预处理：修复大模型在中文双引号与 ** 嵌套时产生的常见排版格式缺陷
+    let text = content
+      // 处理 **“xxx”** 紧贴中文引号导致 marked 判定标点边界失效的情况
+      .replace(/\*\*“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
+      // 处理 “**xxx**”
+      .replace(/“\*\*([^”\n]+)\*\*”/g, '<strong>“$1”</strong>')
+      // 处理 模型遗漏了开头的 **，只在右引号后面带了 **（例如： “炮1平7”**）
+      .replace(/(?<!\*)“([^”\n]+)”\*\*/g, '<strong>“$1”</strong>')
+      // 处理 流式输出中只输出了前半个 **“xxx” 尚未闭合
+      .replace(/\*\*“([^”\n]+)”(?!\*)/g, '<strong>“$1”</strong>')
 
-    // 针对流式传输过程中尚未闭合的 **文本** 或中文双引号进行平滑容错渲染
-    // 如果存在孤立的 **，将其临时转换为高亮强调标签
-    parsed = parsed.replace(/\*\*([^*<>]+?)(?=\*\*|$)/g, '<strong>$1</strong>')
+    // 2. 交给 marked 解析主体语法
+    let parsed = marked.parse(text)
+
+    // 3. 兜底清除残留的 **
+    parsed = parsed.replace(/\*\*([^*\n<]+)\*\*/g, '<strong>$1</strong>')
+    // 消除流式中偶发单侧裸露的 **
+    if (isStreaming.value) {
+      parsed = parsed.replace(/\*\*([^*\n<]+)$/, '<strong>$1</strong>')
+    }
 
     return parsed
   } catch (e) {
@@ -194,7 +200,7 @@ function startStreamChat(question) {
     text: ''
   })
 
-  const url = `http://localhost:8080/api/chess/chat/stream?fen=${encodeURIComponent(props.currentFen)}&question=${encodeURIComponent(question)}`
+  const url = `http://localhost:8080/api/chess/chat/stream?fen=${encodeURIComponent(props.currentFen)}&history=${encodeURIComponent(props.historyText)}&question=${encodeURIComponent(question)}`
   const eventSource = new EventSource(url)
 
   eventSource.onmessage = (event) => {
