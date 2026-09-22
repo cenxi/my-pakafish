@@ -28,6 +28,20 @@
         </div>
         <h3 class="coach-title">象棋特级大师 · 语音私教</h3>
         <p class="coach-subtitle">实时对弈连线 · 边下棋边交流</p>
+
+        <!-- 实时音量波形跳动指示条 -->
+        <div class="mic-volume-meter" v-if="isConnected && !isMuted">
+          <el-icon :size="15" class="vol-mic-icon" :class="{ pulsing: inputVolume > 5 }"><Microphone /></el-icon>
+          <div class="vol-bars-wrapper">
+            <span
+              v-for="idx in 16"
+              :key="idx"
+              class="vol-bar"
+              :class="{ active: inputVolume >= idx * 6 }"
+            ></span>
+          </div>
+          <span class="vol-label">{{ inputVolume > 5 ? '正在收音' : '麦克风待命' }}</span>
+        </div>
       </div>
 
       <!-- 实时识别与 AI 回复动态文字流 -->
@@ -95,6 +109,7 @@ const isAiSpeaking = ref(false)
 const isUserSpeaking = ref(false)
 const isMuted = ref(false)
 const statusText = ref('正在呼叫特级大师...')
+const inputVolume = ref(0) // 实时麦克风音量 (0~100)
 
 const userLiveText = ref('')
 const aiLiveText = ref('')
@@ -102,6 +117,8 @@ const aiLiveText = ref('')
 // 通话计时
 const callSeconds = ref(0)
 let timer = null
+let silenceTimer = null
+let hasSpokenCurrentUtterance = false
 
 const formattedDuration = computed(() => {
   const m = Math.floor(callSeconds.value / 60).toString().padStart(2, '0')
@@ -285,20 +302,48 @@ async function startMicrophone() {
     scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1)
 
     scriptProcessor.onaudioprocess = (e) => {
-      if (isMuted.value || !ws || ws.readyState !== WebSocket.OPEN) return
+      if (isMuted.value || !ws || ws.readyState !== WebSocket.OPEN) {
+        inputVolume.value = 0
+        return
+      }
       const inputData = e.inputBuffer.getChannelData(0)
       
-      // 检测音量大小驱动界面动效
+      // 检测音量大小 (RMS 能量计算，映射为 0~100)
       let sum = 0
       for (let i = 0; i < inputData.length; i++) {
         sum += inputData[i] * inputData[i]
       }
       const rms = Math.sqrt(sum / inputData.length)
-      if (rms > 0.03) {
+      // 放大平滑显示
+      const currentVol = Math.min(100, Math.round(rms * 450))
+      inputVolume.value = currentVol
+
+      // 智能端点检测 (VAD 辅助)：
+      // 1. 用户发声时 (音量高于环境底噪，如 rms > 0.015)
+      if (rms > 0.015) {
         isUserSpeaking.value = true
+        hasSpokenCurrentUtterance = true
+        // 清除正在等待静音的倒计时
+        if (silenceTimer) {
+          clearTimeout(silenceTimer)
+          silenceTimer = null
+        }
+      } else if (hasSpokenCurrentUtterance && !silenceTimer) {
+        // 2. 用户刚说过话，现在出现停顿 (静音持续 900ms 视为说完了)
+        silenceTimer = setTimeout(() => {
+          if (hasSpokenCurrentUtterance) {
+            hasSpokenCurrentUtterance = false
+            isUserSpeaking.value = false
+            silenceTimer = null
+            // 通知后端当前说话片段结束，立即触发 ASR 最终转写与 AI 回答
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'end_audio' }))
+            }
+          }
+        }, 900)
       }
 
-      // 转换为 16位 PCM (Little Endian)
+      // 转换为 16位 PCM (Little Endian) 推流
       const pcm16 = new Int16Array(inputData.length)
       for (let i = 0; i < inputData.length; i++) {
         let s = Math.max(-1, Math.min(1, inputData[i]))
@@ -357,6 +402,12 @@ function startDurationTimer() {
 
 function cleanupCall() {
   clearInterval(timer)
+  if (silenceTimer) {
+    clearTimeout(silenceTimer)
+    silenceTimer = null
+  }
+  hasSpokenCurrentUtterance = false
+  inputVolume.value = 0
   stopCurrentAudio()
   if (scriptProcessor) {
     scriptProcessor.disconnect()
@@ -509,6 +560,58 @@ defineExpose({
     font-size: 12px;
     color: #94a3b8;
     margin: 0;
+  }
+
+  /* 麦克风音量动态波形指示器 */
+  .mic-volume-meter {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    border-radius: 20px;
+    transition: all 0.3s ease;
+
+    .vol-mic-icon {
+      color: #94a3b8;
+      transition: all 0.2s ease;
+
+      &.pulsing {
+        color: #10b981;
+        transform: scale(1.15);
+      }
+    }
+
+    .vol-bars-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 14px;
+
+      .vol-bar {
+        width: 3px;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 2px;
+        transition: height 0.12s ease, background-color 0.12s ease;
+
+        &.active {
+          height: 14px;
+          background: #10b981;
+          box-shadow: 0 0 6px rgba(16, 185, 129, 0.8);
+        }
+      }
+    }
+
+    .vol-label {
+      font-size: 11px;
+      color: #10b981;
+      font-weight: 500;
+      min-width: 52px;
+      text-align: right;
+    }
   }
 }
 

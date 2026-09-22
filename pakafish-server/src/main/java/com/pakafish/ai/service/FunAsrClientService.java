@@ -69,7 +69,9 @@ public class FunAsrClientService {
                     JsonNode root = objectMapper.readTree(text);
                     if (root.has("text")) {
                         String recognized = root.get("text").asText();
-                        boolean isFinal = root.path("is_final").asBoolean(false);
+                        // 兼容 2pass 流式 final 标记与 offline 单段识别完毕模式
+                        boolean isFinal = root.path("is_final").asBoolean(false) 
+                                || "offline".equalsIgnoreCase(root.path("mode").asText());
                         if (recognized != null && !recognized.isBlank()) {
                             onRecognizedText.accept(recognized);
                         }
