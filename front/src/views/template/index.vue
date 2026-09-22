@@ -23,6 +23,12 @@
             引擎执黑
           </el-button>
           <el-button
+            :type="isSandboxMode ? 'warning' : 'default'"
+            @click="toggleSandboxMode"
+          >
+            {{ isSandboxMode ? '退出试拆' : '试拆/分析' }}
+          </el-button>
+          <el-button
             :type="isAnalysisMode ? 'primary' : 'default'"
             @click="toggleAnalysisMode"
           >
@@ -176,6 +182,17 @@
           </div>
         </transition>
 
+        <!-- 试拆模式提示条 -->
+        <transition name="el-zoom-in-top">
+          <div v-if="isSandboxMode" class="sandbox-banner">
+            <div class="banner-left">
+              <span class="sandbox-tag">🧪 试拆分析中</span>
+              <span class="sandbox-desc">当前所有落子仅用于推演，不影响原棋谱</span>
+            </div>
+            <el-button size="small" type="warning" plain @click="toggleSandboxMode">还原并退出试拆</el-button>
+          </div>
+        </transition>
+
         <!-- 步进控制按钮 -->
         <div class="step-controls" v-show="!isVariationMode">
           <el-button size="small" :disabled="currentMoveIndex <= 0" @click="jumpToMove(0)">《 开始</el-button>
@@ -221,10 +238,11 @@
           <span class="title">对局着法谱</span>
           <el-button size="small" text type="primary" @click="copyFen">复制FEN</el-button>
         </div>
-        <div class="move-list">
+        <div ref="moveListRef" class="move-list">
           <div
             v-for="(move, idx) in movePairs"
             :key="idx"
+            :ref="el => setMoveRowRef(el, idx)"
             class="move-pair-row"
             :class="{ active: Math.floor((currentMoveIndex - 1) / 2) === idx }"
           >
@@ -358,6 +376,8 @@ const boardState = ref(parseFen(INITIAL_FEN).board)
 const currentTurn = ref('r')
 const isFlipped = ref(false)
 const isAnalysisMode = ref(true)
+const isSandboxMode = ref(false) // 试拆/沙盒模式
+const sandboxSnapshot = ref(null) // 试拆开始时的原始盘面快照
 const engineSide = ref(null) // 'r', 'b', null
 const isAnalyzing = ref(false)
 const gameOverInfo = ref('') // 绝杀局提示信息
@@ -443,15 +463,21 @@ function applyOpeningPreset(preset) {
 
 // 导师复盘点击历史步跳转 (如点击 "第3回合" -> 跳到第 3 回合)
 function onCoachJumpStep(stepNum) {
-  // 如果输入的是回合数（如第3回合红方走子，对应索引为 (stepNum-1)*2+1 或 stepNum*2）
-  let targetIndex = stepNum
-  if (stepNum <= Math.ceil(historyMoves.value.length / 2)) {
-    // 优先作为回合数匹配
-    targetIndex = (stepNum - 1) * 2 + 1
+  // 如果当前正处于推演模式，必须先干净退出并还原盘面，防止推演残留状态与历史步冲突
+  if (isVariationMode.value) {
+    exitVariationMode()
   }
-  targetIndex = Math.min(targetIndex, historyMoves.value.length)
+
+  // 计算对应回合的步数索引：第 N 回合通常对应该回合红方走棋之后或黑方走棋之后
+  // 象棋一回合包含红黑各一步：第 N 回合红方是 (N-1)*2+1，黑方是 N*2
+  let targetIndex = (stepNum - 1) * 2 + 1
+  if (targetIndex > historyMoves.value.length) {
+    targetIndex = historyMoves.value.length
+  }
+  if (targetIndex < 1) targetIndex = 1
+
   jumpToMove(targetIndex)
-  ElMessage.info(`已切换至第 ${stepNum} 回合盘面`)
+  ElMessage.info(`已回溯至第 ${stepNum} 回合盘面`)
 }
 
 // 分支推演状态机
@@ -463,6 +489,11 @@ const activeVariationArrows = ref([])
 
 // 导师复盘点击变例推演播放器 (如点击 "▶ 炮二平五 → 马8进7 → 车一平二")
 function onCoachPlayVariation(variationText) {
+  // 如果已经在推演模式中，先退出上一个推演并回到基准盘面
+  if (isVariationMode.value) {
+    exitVariationMode()
+  }
+
   // 过滤掉开头结尾的引号、符号与“演进推演”文字
   let clean = variationText.replace(/[“”（）()▶►]/g, '').replace(/演进推演/g, '').trim()
   const rawMoves = clean.split('→').map(m => m.trim()).filter(Boolean)
@@ -483,18 +514,47 @@ function onCoachPlayVariation(variationText) {
   let simTurn = parseFen(currentFen.value).turn
 
   for (const chMove of rawMoves) {
-    const legalFound = findMoveByChinese(simBoard, simTurn, chMove)
+    let legalFound = findMoveByChinese(simBoard, simTurn, chMove)
+
+    // 智能容错：如果未直接匹配到（例如棋评省略了对方的中间过渡棋步），自动从历史棋谱中查找这一步并补全
+    if (!legalFound && historyMoves.value && historyMoves.value.length > 0) {
+      // 尝试在历史对局中查找该中文招法
+      for (let hIdx = 0; hIdx < historyMoves.value.length; hIdx++) {
+        const hItem = historyMoves.value[hIdx]
+        if (hItem.chinese === chMove || hItem.chinese.replace(/\s+/g, '') === chMove.replace(/\s+/g, '')) {
+          const uci = hItem.uci
+          if (uci && uci.length >= 4) {
+            const fc = uci.charCodeAt(0) - 97
+            const fr = parseInt(uci[1], 10)
+            const tc = uci.charCodeAt(2) - 97
+            const tr = parseInt(uci[3], 10)
+            const p = simBoard[fr]?.[fc]
+            legalFound = {
+              from: { r: fr, c: fc },
+              to: { r: tr, c: tc },
+              turn: p ? p.color : simTurn
+            }
+            break
+          }
+        }
+      }
+    }
+
     if (legalFound) {
       arrowList.push({ from: legalFound.from, to: legalFound.to })
       parsedSteps.push({
         chinese: chMove,
         from: legalFound.from,
-        to: legalFound.to
+        to: legalFound.to,
+        turn: legalFound.turn
       })
+      // 推进模拟局面
       const piece = simBoard[legalFound.from.r][legalFound.from.c]
-      simBoard[legalFound.to.r][legalFound.to.c] = piece
-      simBoard[legalFound.from.r][legalFound.from.c] = null
-      simTurn = simTurn === 'r' ? 'b' : 'r'
+      if (piece) {
+        simBoard[legalFound.to.r][legalFound.to.c] = piece
+        simBoard[legalFound.from.r][legalFound.from.c] = null
+      }
+      simTurn = legalFound.turn === 'r' ? 'b' : 'r'
     } else {
       console.warn('分支招法在推演局面中未匹配:', chMove)
     }
@@ -532,7 +592,7 @@ function stepVariation(delta) {
     const piece = curBoard[s.from.r][s.from.c]
     curBoard[s.to.r][s.to.c] = piece
     curBoard[s.from.r][s.from.c] = null
-    curTurn = curTurn === 'r' ? 'b' : 'r'
+    curTurn = s.turn === 'r' ? 'b' : 'r'
     lastFrom = s.from
     lastTo = s.to
   }
@@ -573,8 +633,21 @@ function exitVariationMode() {
   ElMessage.info('已退出推演，已完整恢复原始对局与棋谱')
 }
 
-// 辅助函数：根据中文招法在当前棋盘中匹配对应的走法
+// 辅助函数：根据中文招法在当前棋盘中匹配对应的走法（若未指定行棋方，则自动识别红黑双方）
 function findMoveByChinese(board, turn, chinese) {
+  // 1. 先用期望的行棋方匹配
+  const res = tryFindMove(board, turn, chinese)
+  if (res) return { ...res, turn }
+
+  // 2. 如果当前方没匹配到，尝试用对方匹配（处理如“车9进1 → 车9平3”这种仅给出单方连续走子的跨回合棋评）
+  const oppTurn = turn === 'r' ? 'b' : 'r'
+  const oppRes = tryFindMove(board, oppTurn, chinese)
+  if (oppRes) return { ...oppRes, turn: oppTurn }
+
+  return null
+}
+
+function tryFindMove(board, turn, chinese) {
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
       const p = board[r][c]
@@ -642,6 +715,31 @@ const historyMoves = ref([]) // [ { uci, chinese, fen } ]
 const currentMoveIndex = ref(0)
 const engineResult = ref(null)
 const aiCoachRef = ref(null)
+const moveListRef = ref(null)
+const moveRowRefs = ref({})
+
+function setMoveRowRef(el, idx) {
+  if (el) {
+    moveRowRefs.value[idx] = el
+  }
+}
+
+// 自动让着法谱列表平滑滚动到当前所选回合所在位置
+function scrollToCurrentMoveRow(index) {
+  nextTick(() => {
+    if (index <= 0) {
+      if (moveListRef.value) {
+        moveListRef.value.scrollTo({ top: 0, behavior: 'smooth' })
+      }
+      return
+    }
+    const roundIdx = Math.floor((index - 1) / 2)
+    const targetEl = moveRowRefs.value[roundIdx]
+    if (targetEl && moveListRef.value) {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  })
+}
 
 const latestMoveChinese = computed(() => {
   if (currentMoveIndex.value <= 0) return ''
@@ -749,6 +847,39 @@ function onBoardCellClick({ r, c }) {
   }
 }
 
+// 切换试拆/沙盒模式
+function toggleSandboxMode() {
+  if (!isSandboxMode.value) {
+    // 开启试拆：记录当前对局的所有快照
+    sandboxSnapshot.value = {
+      fen: currentFen.value,
+      moveIndex: currentMoveIndex.value,
+      history: [...historyMoves.value],
+      lastHighlight: lastMoveHighlight.value
+    }
+    isSandboxMode.value = true
+    ElMessage.success('已进入【试拆模式】：现在可以随意摆子拆棋，棋谱将完全保留，退出时一键还原！')
+  } else {
+    // 退出试拆：完整还原原始局面
+    if (sandboxSnapshot.value) {
+      const snap = sandboxSnapshot.value
+      historyMoves.value = snap.history
+      currentMoveIndex.value = snap.moveIndex
+      currentFen.value = snap.fen
+      const p = parseFen(snap.fen)
+      boardState.value = p.board
+      currentTurn.value = p.turn
+      lastMoveHighlight.value = snap.lastHighlight
+      selectedPiecePos.value = null
+      legalMoves.value = []
+      sandboxSnapshot.value = null
+    }
+    isSandboxMode.value = false
+    triggerPikafishAnalyze()
+    ElMessage.info('已退出试拆模式，已恢复完整原始棋谱')
+  }
+}
+
 // 执行走棋
 function executeMove(from, to) {
   const piece = boardState.value[from.r][from.c]
@@ -780,12 +911,19 @@ function executeMove(from, to) {
 
   lastMoveHighlight.value = { from, to }
 
+  // 如果是在【试拆模式】下落子，只演练盘面，坚决不修改、不截断原对局棋谱！
+  if (isSandboxMode.value) {
+    triggerPikafishAnalyze()
+    return
+  }
+
   if (currentMoveIndex.value < historyMoves.value.length) {
     historyMoves.value = historyMoves.value.slice(0, currentMoveIndex.value)
   }
 
   historyMoves.value.push({ uci, chinese, fen: newFen })
   currentMoveIndex.value = historyMoves.value.length
+  scrollToCurrentMoveRow(currentMoveIndex.value)
 
   // 4. 判定是否已进入绝杀局 (胜负已分)
   const isMated = isCheckmate(boardState.value, currentTurn.value)
@@ -939,6 +1077,9 @@ function jumpToMove(index) {
   } else {
     lastMoveHighlight.value = null
   }
+
+  // 联动着法谱滚动条，平滑滚动至可视区域
+  scrollToCurrentMoveRow(index)
 
   triggerPikafishAnalyze()
 }

@@ -13,6 +13,57 @@
         </div>
       </div>
       <div class="header-actions">
+        <!-- 实时电话连线按钮 -->
+        <el-tooltip content="连线特级大师 (打电话模式)" placement="top">
+          <el-button
+            size="small"
+            type="success"
+            circle
+            @click="openPhoneCall"
+          >
+            <el-icon><PhoneFilled /></el-icon>
+          </el-button>
+        </el-tooltip>
+
+        <!-- 语音设置 Popover -->
+        <el-popover placement="bottom-end" :width="280" trigger="click">
+          <template #reference>
+            <el-button size="small" :icon="Headset" circle />
+          </template>
+          <div class="voice-config-popover">
+            <h4 class="popover-title">大师语音设置</h4>
+            <div class="config-item">
+              <span class="label">自动朗读回复：</span>
+              <el-switch v-model="autoSpeakEnabled" size="small" />
+            </div>
+            <div class="config-item">
+              <span class="label">大师音色：</span>
+              <el-select v-model="selectedVoice" size="small" style="width: 150px">
+                <el-option
+                  v-for="v in voiceOptions"
+                  :key="v.code"
+                  :label="v.name"
+                  :value="v.code"
+                />
+              </el-select>
+            </div>
+            <div class="config-item">
+              <span class="label">朗读取速：</span>
+              <el-select v-model="selectedRate" size="small" style="width: 150px">
+                <el-option label="较慢 (-20%)" value="-20%" />
+                <el-option label="正常 (标准)" value="+0%" />
+                <el-option label="微快 (+15%)" value="+15%" />
+                <el-option label="快速 (+30%)" value="+30%" />
+              </el-select>
+            </div>
+            <div class="popover-actions">
+              <el-button size="small" type="primary" plain @click="testCurrentVoice">
+                试听大师音色
+              </el-button>
+            </div>
+          </div>
+        </el-popover>
+
         <el-tooltip :content="isExpanded ? '还原窗口' : '全屏放大对话'" placement="top">
           <el-button
             size="small"
@@ -38,6 +89,20 @@
           </div>
           <!-- Markdown 渲染气泡 -->
           <div class="markdown-body text-bubble" @click="handleBubbleClick" v-html="renderMarkdown(msg.text)"></div>
+          <!-- 气泡底部语音控制条 (仅 assistant 角色显示) -->
+          <div v-if="msg.role === 'assistant' && msg.text" class="speech-action-bar">
+            <button
+              class="speech-btn"
+              :class="{ playing: currentPlayingIndex === idx }"
+              @click.stop="togglePlayMessageVoice(msg.text, idx)"
+            >
+              <el-icon :size="14">
+                <VideoPause v-if="currentPlayingIndex === idx" />
+                <Headset v-else />
+              </el-icon>
+              <span>{{ currentPlayingIndex === idx ? '正在朗读 (点击停止)' : '朗读本段' }}</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -71,6 +136,17 @@
         :disabled="isStreaming"
         @keyup.enter="handleSend"
       >
+        <template #prepend>
+          <el-tooltip :content="isRecording ? '点击结束语音录入' : '语音输入 (FunASR)'" placement="top">
+            <el-button
+              :type="isRecording ? 'danger' : 'default'"
+              :class="{ 'recording-active': isRecording }"
+              @click="toggleSpeechInput"
+            >
+              <el-icon><Microphone /></el-icon>
+            </el-button>
+          </el-tooltip>
+        </template>
         <template #append>
           <el-button type="primary" :loading="isStreaming" @click="handleSend">
             发送
@@ -78,13 +154,35 @@
         </template>
       </el-input>
     </div>
+
+    <!-- 实时语音电话弹窗 -->
+    <AiPhoneCallDialog
+      ref="phoneCallDialogRef"
+      :current-fen="currentFen"
+      :history-moves="historyMoves"
+      :selected-voice="selectedVoice"
+      :selected-rate="selectedRate"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
-import { InfoFilled, Delete, Loading, FullScreen, Close } from '@element-plus/icons-vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import {
+  InfoFilled,
+  Delete,
+  Loading,
+  FullScreen,
+  Close,
+  Headset,
+  PhoneFilled,
+  Microphone,
+  VideoPause
+} from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
+import axios from 'axios'
+import AiPhoneCallDialog from './AiPhoneCallDialog.vue'
 
 // 配置 marked 安全基础设置
 marked.setOptions({
@@ -184,12 +282,202 @@ function handleBubbleClick(e) {
   }
 }
 
-function scrollToBottom() {
-  nextTick(() => {
-    if (chatBodyRef.value) {
-      chatBodyRef.value.scrollTop = chatBodyRef.value.scrollHeight
+const phoneCallDialogRef = ref(null)
+
+// 语音配置
+const autoSpeakEnabled = ref(false)
+const selectedVoice = ref('zh-CN-XiaoxiaoNeural')
+const selectedRate = ref('+0%')
+const voiceOptions = ref([])
+
+// 语音播放控制
+const currentPlayingIndex = ref(-1)
+let activeAudio = null
+
+// 语音输入（FunASR 录入状态）
+const isRecording = ref(false)
+let asrWs = null
+let asrAudioContext = null
+let asrMediaStream = null
+let asrProcessor = null
+
+// 获取后端主机地址 (兼容本地与局域网访问)
+const getApiBaseUrl = () => {
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+  const host = window.location.hostname || 'localhost'
+  return `${protocol}//${host}:8080`
+}
+
+const getWsBaseUrl = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.hostname || 'localhost'
+  return `${protocol}//${host}:8080`
+}
+
+onMounted(async () => {
+  try {
+    const res = await axios.get(`${getApiBaseUrl()}/api/tts/voices`)
+    if (Array.isArray(res.data)) {
+      voiceOptions.value = res.data
     }
+  } catch (e) {
+    voiceOptions.value = [
+      { code: 'zh-CN-XiaoxiaoNeural', name: '晓晓 (温柔亲切女声 - 推荐)' },
+      { code: 'zh-CN-YunxiNeural', name: '云希 (阳光开朗男声 - 推荐)' },
+      { code: 'zh-CN-YunjianNeural', name: '云健 (稳重磁性男声 - 适合解说)' },
+      { code: 'zh-CN-liaoning-XiaobeiNeural', name: '小北 (风趣东北女声)' }
+    ]
+  }
+})
+
+onUnmounted(() => {
+  stopAudio()
+  stopSpeechInput()
+})
+
+function openPhoneCall() {
+  stopAudio()
+  if (phoneCallDialogRef.value) {
+    phoneCallDialogRef.value.openCall()
+  }
+}
+
+function stopAudio() {
+  if (activeAudio) {
+    activeAudio.pause()
+    activeAudio = null
+  }
+  currentPlayingIndex.value = -1
+}
+
+function playVoiceText(text, msgIdx = -1) {
+  if (!text) return
+  stopAudio()
+
+  currentPlayingIndex.value = msgIdx
+  const url = `${getApiBaseUrl()}/api/tts/speak?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(selectedVoice.value)}&rate=${encodeURIComponent(selectedRate.value)}`
+  activeAudio = new Audio(url)
+  activeAudio.onended = () => {
+    currentPlayingIndex.value = -1
+    activeAudio = null
+  }
+  activeAudio.onerror = () => {
+    currentPlayingIndex.value = -1
+    activeAudio = null
+  }
+  activeAudio.play().catch(e => {
+    console.warn('播放被浏览器安全策略限制:', e)
+    currentPlayingIndex.value = -1
   })
+}
+
+function togglePlayMessageVoice(text, idx) {
+  if (currentPlayingIndex.value === idx) {
+    stopAudio()
+  } else {
+    playVoiceText(text, idx)
+  }
+}
+
+function testCurrentVoice() {
+  playVoiceText('你好！我是你的象棋特级大师私教，很高兴为你讲盘！')
+}
+
+// 语音输入 (通过 WebSocket 直连 FunASR 识别)
+async function toggleSpeechInput() {
+  if (isRecording.value) {
+    stopSpeechInput()
+  } else {
+    await startSpeechInput()
+  }
+}
+
+async function startSpeechInput() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    ElMessage.warning('当前环境不支持麦克风调用（浏览器要求在 localhost 或 HTTPS 环境下使用）')
+    return
+  }
+  try {
+    asrMediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    })
+
+    const wsUrl = `${getWsBaseUrl()}/ws/ai-call`
+    asrWs = new WebSocket(wsUrl)
+
+    asrWs.onopen = () => {
+      isRecording.value = true
+      ElMessage.success('正在录音，请清晰说出你的问题...')
+    }
+
+    asrWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'asr_partial' || data.type === 'asr_final') {
+          inputQuery.value = data.text
+          if (data.type === 'asr_final') {
+            stopSpeechInput()
+            handleSend()
+          }
+        }
+      } catch (e) {}
+    }
+
+    asrWs.onerror = () => {
+      ElMessage.warning('未能连接语音识别服务（若未启动 FunASR Docker 请先启动）')
+      stopSpeechInput()
+    }
+
+    asrAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
+    const source = asrAudioContext.createMediaStreamSource(asrMediaStream)
+    asrProcessor = asrAudioContext.createScriptProcessor(2048, 1, 1)
+
+    asrProcessor.onaudioprocess = (e) => {
+      if (!asrWs || asrWs.readyState !== WebSocket.OPEN) return
+      const input = e.inputBuffer.getChannelData(0)
+      const pcm16 = new Int16Array(input.length)
+      for (let i = 0; i < input.length; i++) {
+        let s = Math.max(-1, Math.min(1, input[i]))
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+      }
+      asrWs.send(pcm16.buffer)
+    }
+
+    source.connect(asrProcessor)
+    asrProcessor.connect(asrAudioContext.destination)
+
+  } catch (err) {
+    ElMessage.error('无法启用麦克风: ' + err.message)
+    stopSpeechInput()
+  }
+}
+
+function stopSpeechInput() {
+  isRecording.value = false
+  if (asrProcessor) {
+    asrProcessor.disconnect()
+    asrProcessor = null
+  }
+  if (asrAudioContext) {
+    asrAudioContext.close().catch(() => {})
+    asrAudioContext = null
+  }
+  if (asrMediaStream) {
+    asrMediaStream.getTracks().forEach(t => t.stop())
+    asrMediaStream = null
+  }
+  if (asrWs) {
+    try {
+      asrWs.send(JSON.stringify({ type: 'end_audio' }))
+    } catch (e) {}
+    asrWs.close()
+    asrWs = null
+  }
 }
 
 function handleClearChat() {
@@ -236,7 +524,7 @@ function startStreamChat(question) {
     text: ''
   })
 
-  const url = `http://localhost:8080/api/chess/chat/stream?fen=${encodeURIComponent(props.currentFen)}&history=${encodeURIComponent(props.historyText)}&question=${encodeURIComponent(question)}`
+  const url = `${getApiBaseUrl()}/api/chess/chat/stream?fen=${encodeURIComponent(props.currentFen)}&history=${encodeURIComponent(props.historyText)}&question=${encodeURIComponent(question)}`
   const eventSource = new EventSource(url)
 
   eventSource.onmessage = (event) => {
@@ -249,6 +537,10 @@ function startStreamChat(question) {
   eventSource.addEventListener('finish', () => {
     isStreaming.value = false
     eventSource.close()
+    // 若开启了自动朗读，大模型输出结束后自动发音
+    if (autoSpeakEnabled.value && messageList.value[assistantMsgIndex]) {
+      playVoiceText(messageList.value[assistantMsgIndex].text, assistantMsgIndex)
+    }
   })
 
   eventSource.addEventListener('error', (e) => {
@@ -667,6 +959,91 @@ function startStreamChat(question) {
   :deep(.el-input__wrapper) {
     padding-top: 6px;
     padding-bottom: 6px;
+  }
+}
+
+.voice-config-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .popover-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1f2329;
+    border-bottom: 1px solid #f2f3f5;
+    padding-bottom: 8px;
+  }
+
+  .config-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: #4e5969;
+  }
+
+  .popover-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+}
+
+.speech-action-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+
+  .speech-btn {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 12px;
+    color: #86909c;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    transition: all 0.2s;
+
+    &:hover {
+      color: #409eff;
+      background: #f0f7ff;
+    }
+
+    &.playing {
+      color: #e6a23c;
+      background: #fdf6ec;
+      font-weight: 500;
+      animation: pulse-audio 1.5s infinite;
+    }
+  }
+}
+
+.recording-active {
+  animation: pulse-mic 1.2s infinite;
+  background-color: #f56c6c !important;
+  color: #ffffff !important;
+}
+
+@keyframes pulse-mic {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(245, 108, 108, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(245, 108, 108, 0);
+  }
+}
+
+@keyframes pulse-audio {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
   }
 }
 </style>

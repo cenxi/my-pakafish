@@ -19,3 +19,8 @@ llm:
     api-key: "cli05243"
     model-name: "gemini-3.8-flash-high"
     temperature: 0.7
+
+funasr:
+  # FunASR 容器默认 websocket 端口为 10095
+  ws-url: "ws://127.0.0.1:10095"
+  sample-rate: 16000
