@@ -52,9 +52,6 @@ public class ChessApiController {
         Boolean forceEngine = (request.containsKey("forceEngine") && Boolean.TRUE.equals(request.get("forceEngine"))) || !useBook;
 
         Boolean immediate = request.containsKey("immediate") && Boolean.TRUE.equals(request.get("immediate"));
-        if (immediate) {
-            pikafishEngineService.stopCurrentSearch();
-        }
 
         log.info("【走棋/分析请求】FEN: {}, depth: {}, movetime: {}, useBook: {}, forceEngine: {}, immediate: {}", fen, depth, movetime, useBook, forceEngine, immediate);
 
@@ -85,7 +82,8 @@ public class ChessApiController {
         Boolean noCache = request.containsKey("noCache") && Boolean.TRUE.equals(request.get("noCache"));
         if (!forceEngine && !noCache) {
             EngineAnalysisResult cached = pikafishEngineService.getCachedAnalysis(fen);
-            if (cached != null && cached.getDepth() != null && cached.getDepth() >= 12) {
+            // 只有高深度且非预热推导的实际引擎算力缓存才予以复用
+            if (cached != null && cached.getDepth() != null && cached.getDepth() >= 15 && !Boolean.TRUE.equals(cached.getFromCache())) {
                 log.info("【L1缓存命中】返回复用分析 (0ms), 着法: {} ({}), 深度: {}, 分值: {}",
                         cached.getBestMove(), cached.getBestMoveChinese(), cached.getDepth(), cached.getScoreCp());
                 if (cached.getBestMoveChinese() == null && cached.getBestMove() != null) {
@@ -106,6 +104,9 @@ public class ChessApiController {
         log.info("【皮卡鱼推演完成】耗时: {} ms, 最佳着法: {}, 深度: {}", elapsed, result != null ? result.getBestMove() : "null", result != null ? result.getDepth() : 0);
         if (result != null) {
             result.setFromBook(false);
+            if (result.getFromCache() == null) {
+                result.setFromCache(false);
+            }
             if (result.getBestMove() != null && result.getBestMoveChinese() == null) {
                 result.setBestMoveChinese(coordinateConverter.uciToChinese(fen, result.getBestMove()));
             }
@@ -164,11 +165,12 @@ public class ChessApiController {
             @RequestParam(value = "useBook", required = false, defaultValue = "true") Boolean useBook) {
 
         SseEmitter emitter = new SseEmitter(300_000L); // 5分钟
+        final long sessionId = pikafishEngineService.generateSessionId();
 
-        // 监听客户端主动断开连接或超时，立即 stop 中断引擎推演，释放锁资源！
-        emitter.onCompletion(() -> pikafishEngineService.stopCurrentSearch());
-        emitter.onTimeout(() -> pikafishEngineService.stopCurrentSearch());
-        emitter.onError(e -> pikafishEngineService.stopCurrentSearch());
+        // 监听客户端主动断开连接或超时，带会话ID精准取消，绝不误杀后续请求！
+        emitter.onCompletion(() -> pikafishEngineService.cancelSearch(sessionId));
+        emitter.onTimeout(() -> pikafishEngineService.cancelSearch(sessionId));
+        emitter.onError(e -> pikafishEngineService.cancelSearch(sessionId));
 
         Thread.startVirtualThread(() -> {
             try {
@@ -216,7 +218,7 @@ public class ChessApiController {
                 }
 
                 // 3. 启动皮卡鱼流式深算（利用引擎底层 TT Hash 记忆继续向下深算）
-                pikafishEngineService.streamAnalyze(fen, depth, snapshot -> {
+                pikafishEngineService.streamAnalyze(sessionId, fen, depth, snapshot -> {
                     try {
                         if (snapshot.getBestMove() != null && snapshot.getBestMoveChinese() == null) {
                             snapshot.setBestMoveChinese(coordinateConverter.uciToChinese(fen, snapshot.getBestMove()));
@@ -230,8 +232,8 @@ public class ChessApiController {
                         }
                         emitter.send(SseEmitter.event().name("analysis").data(snapshot));
                     } catch (Exception e) {
-                        // 客户端已断开，抛出运行时异常让皮卡鱼引擎立刻终止循环
-                        pikafishEngineService.stopCurrentSearch();
+                        // 客户端已断开，精准终止本会话推演
+                        pikafishEngineService.cancelSearch(sessionId);
                         throw new RuntimeException("SSE_CLIENT_DISCONNECTED", e);
                     }
                 });

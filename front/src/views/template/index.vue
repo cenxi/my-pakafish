@@ -1042,6 +1042,7 @@ async function triggerEngineBestMove() {
       depth: searchDepth.value,
       movetime: searchMovetime.value || 1000,
       immediate: true,
+      noCache: true,
       useBook: useOpeningBook.value
     })
     engineResult.value = resp.data

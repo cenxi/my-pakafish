@@ -44,6 +44,12 @@ public class PikafishEngineService {
 
     private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
     private volatile boolean isSearching = false;
+    private final java.util.concurrent.atomic.AtomicLong sessionSequence = new java.util.concurrent.atomic.AtomicLong(0);
+    private volatile Long activeSessionId = null;
+
+    public long generateSessionId() {
+        return sessionSequence.incrementAndGet();
+    }
 
     private final java.util.concurrent.ScheduledExecutorService watchdogExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "pikafish-watchdog");
@@ -208,14 +214,32 @@ public class PikafishEngineService {
     }
 
     /**
-     * 强行中断当前正在运行的推演（使引擎立即吐出当前深度的 bestmove）
+     * 强行中断当前正在运行的推演（仅当处于推演中时发送 stop）
      */
-    public void stopCurrentSearch() {
-        try {
-            sendCommand("stop");
-            log.debug("【皮卡鱼指令】已发送 stop 中断计算");
-        } catch (Exception e) {
-            log.warn("发送 stop 异常", e);
+    public synchronized void stopCurrentSearch() {
+        if (isSearching) {
+            try {
+                sendCommand("stop");
+                log.info("【皮卡鱼指令】发送 stop 中断当前活动计算 (会话 #{})", activeSessionId);
+            } catch (Exception e) {
+                log.warn("发送 stop 异常", e);
+            }
+        }
+    }
+
+    /**
+     * 带会话 ID 的精准取消：仅当活动会话匹配指定 session 时才执行 stop，彻底杜绝异步回调误杀新请求
+     */
+    public synchronized void cancelSearch(long sessionId) {
+        if (activeSessionId != null && activeSessionId == sessionId && isSearching) {
+            log.info("【皮卡鱼取消会话】当前会话 #{} 被取消，发送 stop", sessionId);
+            try {
+                sendCommand("stop");
+            } catch (Exception e) {
+                log.warn("取消会话发送 stop 异常", e);
+            }
+        } else {
+            log.debug("【皮卡鱼忽略过期中断】会话 #{} 已结束或不匹配当前活动会话 #{}", sessionId, activeSessionId);
         }
     }
 
@@ -226,7 +250,9 @@ public class PikafishEngineService {
     public synchronized void ensureEngineReady() {
         try {
             ensureEngine();
-            sendCommand("stop");
+            if (isSearching) {
+                sendCommand("stop");
+            }
             sendCommand("isready");
 
             long startTime = System.currentTimeMillis();
@@ -334,15 +360,18 @@ public class PikafishEngineService {
      * 同步分析（单次出招计算，带严格超时防护与管道排空）
      */
     public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit) {
-        // 抢占式：如果正在进行后台推演，先发 stop 唤醒并抢锁
+        long sessionId = generateSessionId();
+        log.info("【皮卡鱼单次分析】准备启动会话 #{}, FEN: {}", sessionId, fen);
+
+        // 抢占式：如果正在进行后台推演，先通知当前推演尽快停下
         stopCurrentSearch();
 
         try {
             if (!lock.tryLock(5, TimeUnit.SECONDS)) {
-                log.warn("获取皮卡鱼引擎锁超时，强行 stop 并重试");
+                log.warn("【会话 #{}】获取皮卡鱼引擎锁超时，强行 stop 并重试", sessionId);
                 stopCurrentSearch();
                 if (!lock.tryLock(3, TimeUnit.SECONDS)) {
-                    log.error("二次获取锁失败，强杀重启引擎并最后尝试");
+                    log.error("【会话 #{}】二次获取锁失败，强杀重启引擎并最后尝试", sessionId);
                     restartEngineProcess();
                     if (!lock.tryLock(2, TimeUnit.SECONDS)) {
                         return null;
@@ -359,6 +388,11 @@ public class PikafishEngineService {
             // 拿到锁后，确保管道排空且引擎彻底就绪
             ensureEngineReady();
 
+            synchronized (this) {
+                activeSessionId = sessionId;
+                isSearching = true;
+            }
+
             sendCommand("position fen " + fen);
 
             // 安全深度与思考时间约束
@@ -369,47 +403,55 @@ public class PikafishEngineService {
             goCmd.append(" depth ").append(safeDepth);
             goCmd.append(" movetime ").append(safeMovetime);
 
-            log.info("【皮卡鱼指令】单次分析发送: {}", goCmd);
+            log.info("【皮卡鱼指令】【会话 #{}】单次分析发送: {}", sessionId, goCmd);
             sendCommand(goCmd.toString());
-            isSearching = true;
 
             // 超时防护：超过期望时间 + 5s 强制杀进程解卡
             int watchdogTimeout = safeMovetime + 5000;
             watchdog = watchdogExecutor.schedule(() -> {
-                log.error("【皮卡鱼严重超时】单次分析超过 {} ms 未能返回 bestmove，强制重启引擎解除阻塞", watchdogTimeout);
+                log.error("【皮卡鱼严重超时】【会话 #{}】单次分析超过 {} ms 未能返回 bestmove，强制重启引擎解除阻塞", sessionId, watchdogTimeout);
                 restartEngineProcess();
             }, watchdogTimeout, TimeUnit.MILLISECONDS);
 
-            EngineAnalysisResult result = readUntilBestmove(fen, null);
-            isSearching = false;
+            EngineAnalysisResult result = readUntilBestmove(sessionId, fen, null);
             return result;
         } catch (Exception e) {
-            isSearching = false;
-            log.error("皮卡鱼分析异常", e);
+            log.error("【皮卡鱼分析异常】【会话 #" + sessionId + "】", e);
             return null;
         } finally {
             if (watchdog != null) {
                 watchdog.cancel(false);
             }
-            isSearching = false;
+            synchronized (this) {
+                if (activeSessionId != null && activeSessionId == sessionId) {
+                    activeSessionId = null;
+                }
+                isSearching = false;
+            }
             lock.unlock();
         }
+    }
+
+    public EngineAnalysisResult streamAnalyze(String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
+        return streamAnalyze(generateSessionId(), fen, maxDepth, onProgress);
     }
 
     /**
      * 流式分析（SSE 模式）：发送 go depth <safeDepth>，每推深一层通过 callback 推送中间结果，
      * 具备抢占式中断与排空能力，新请求进入时自动打断旧推演释放锁。
      */
-    public EngineAnalysisResult streamAnalyze(String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
+    public EngineAnalysisResult streamAnalyze(long sessionId, String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
+        log.info("【皮卡鱼流式推演】准备启动会话 #{}, FEN: {}", sessionId, fen);
+
         // 抢占式：如果正在运行前一个推演，立刻 stop 中断它
         stopCurrentSearch();
 
         try {
             if (!lock.tryLock(5, TimeUnit.SECONDS)) {
-                log.warn("获取流式推演锁超时，强行 stop 并重试");
+                log.warn("【会话 #{}】获取流式推演锁超时，强行 stop 并重试", sessionId);
                 stopCurrentSearch();
                 if (!lock.tryLock(3, TimeUnit.SECONDS)) {
-                    log.error("二次获取流式推演锁失败");
+                    log.error("【会话 #{}】二次获取流式推演锁失败", sessionId);
                     return null;
                 }
             }
@@ -422,32 +464,42 @@ public class PikafishEngineService {
             // 拿到锁后，确保管道排空且引擎彻底就绪
             ensureEngineReady();
 
+            synchronized (this) {
+                activeSessionId = sessionId;
+                isSearching = true;
+            }
+
             // 限制流式推演最大深度在 15~35 层区间，杜绝 128 层天文运算
             int safeDepth = Math.min(Math.max(maxDepth, 15), 35);
             sendCommand("position fen " + fen);
-            log.info("【皮卡鱼指令】流式推演启动: depth {}", safeDepth);
+            log.info("【皮卡鱼指令】【会话 #{}】流式推演启动: depth {}", sessionId, safeDepth);
             sendCommand("go depth " + safeDepth);
-            isSearching = true;
 
-            EngineAnalysisResult result = readUntilBestmove(fen, onProgress);
-            isSearching = false;
+            EngineAnalysisResult result = readUntilBestmove(sessionId, fen, onProgress);
             return result;
         } catch (Exception e) {
-            isSearching = false;
-            log.error("皮卡鱼流式分析异常", e);
+            log.error("【皮卡鱼流式分析异常】【会话 #" + sessionId + "】", e);
             return null;
         } finally {
-            isSearching = false;
+            synchronized (this) {
+                if (activeSessionId != null && activeSessionId == sessionId) {
+                    activeSessionId = null;
+                }
+                isSearching = false;
+            }
             lock.unlock();
         }
     }
 
     /**
      * 从引擎输出流中持续读取 info 行，解析并回调，直到遇到 bestmove。
+     * @param sessionId 当前会话 ID
      * @param onProgress 若非 null，每次 info depth 行解析后回调推送中间结果
      */
-    private EngineAnalysisResult readUntilBestmove(String fen, Consumer<EngineAnalysisResult> onProgress) throws IOException {
+    private EngineAnalysisResult readUntilBestmove(long sessionId, String fen, Consumer<EngineAnalysisResult> onProgress) throws IOException {
         EngineAnalysisResult result = new EngineAnalysisResult();
+        result.setFromCache(false);
+        result.setFromBook(false);
         String lastPvLine = null;
         int lastReportedDepth = 0;
 
@@ -499,10 +551,9 @@ public class PikafishEngineService {
                     try {
                         onProgress.accept(snapshot);
                     } catch (Exception e) {
-                        // 客户端断开连接（Broken pipe），立刻中断引擎计算并彻底排空管道！
-                        log.info("【SSE客户端已断开】立即中断并排空皮卡鱼推演管道");
-                        ensureEngineReady();
-                        break;
+                        // 客户端断开连接（Broken pipe），发送 stop 中断本会话推演并继续读完 bestmove 排空管道！
+                        log.info("【SSE客户端已断开】【会话 #{}】发送 stop 中断推演并排空管道", sessionId);
+                        cancelSearch(sessionId);
                     }
                 }
             } else if (line.startsWith("bestmove ")) {
@@ -518,6 +569,7 @@ public class PikafishEngineService {
         }
 
         if (lastPvLine != null) {
+            log.debug("【皮卡鱼推演】【会话 #{}】深度 {} 最终主要变例: {}", sessionId, result.getDepth(), lastPvLine);
             result.setPvMoves(Arrays.asList(lastPvLine.split("\\s+")));
         } else if (result.getBestMove() != null) {
             result.setPvMoves(List.of(result.getBestMove()));
@@ -570,9 +622,10 @@ public class PikafishEngineService {
     private void applyAbsoluteScore(EngineAnalysisResult result, String fen) {
         if (result.getScoreCp() == null) return;
         boolean isRedTurn = !fen.contains(" b ");
-        int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
+        int rawScore = result.getScoreCp();
+        int redScore = isRedTurn ? rawScore : -rawScore;
         result.setScoreCp(redScore);
-        result.setWinRate(calculateWinRate(isRedTurn ? result.getScoreCp() : -result.getScoreCp()));
+        result.setWinRate(calculateWinRate(redScore));
 
         if (redScore == 0) {
             result.setSideAdvantageText("均势 (0分)");

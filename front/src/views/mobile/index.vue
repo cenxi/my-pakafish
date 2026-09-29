@@ -629,7 +629,7 @@ async function executeUserMove(from, to) {
     executeEngineMove()
   } else {
     // 轮到人类思考，引擎不闲着，持续向更深层（最高 60 层）深度分析推演
-    triggerMobileContinuousAnalyze()
+    startMobileSseAnalyze()
   }
 }
 
@@ -702,6 +702,7 @@ async function executeEngineMove() {
       depth: searchDepth.value,
       movetime: searchMovetime.value || 1000,
       immediate: true,
+      noCache: true,
       useBook: useOpeningBook.value
     })
 

@@ -59,4 +59,18 @@ public class OpeningBookServiceTest {
         boolean hasHorse = moves.stream().anyMatch(m -> "b9c7".equals(m.getUci()) || "h9g7".equals(m.getUci()));
         assertTrue(hasHorse, "当头炮后黑方应当有马8进7或马2进3应手");
     }
+
+    @Test
+    public void testBlackReplyToH2E2Mirrored() {
+        // 红方炮二平五 (h2e2) 后的局面 (镜像局面)
+        String fenH2E2 = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR b";
+        List<BookMove> moves = openingBookService.getBookMoves(fenH2E2);
+
+        assertNotNull(moves);
+        assertFalse(moves.isEmpty(), "炮二平五后黑方应手必须命中开局库(通过镜像匹配)");
+        System.out.println("炮二平五 (h2e2) 后黑方候选着法数: " + moves.size());
+        for (BookMove m : moves) {
+            System.out.printf("  %s (%s) 权重: %d\n", m.getUci(), m.getChinese(), m.getWeight());
+        }
+    }
 }
