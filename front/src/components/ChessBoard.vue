@@ -162,51 +162,48 @@ const props = defineProps({
 const emit = defineEmits(['cell-click'])
 
 function handleCellClick(r, c) {
-  const actualR = props.isFlipped ? (9 - r) : r
+  const actualR = props.isFlipped ? r : (9 - r)
   const actualC = props.isFlipped ? (8 - c) : c
   emit('cell-click', { r: actualR, c: actualC })
 }
 
 function getPiece(displayR, displayC) {
-  const actualR = props.isFlipped ? (9 - displayR) : displayR
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
   return props.board[actualR]?.[actualC] || null
 }
 
 function isSelectedCell(displayR, displayC) {
   if (!props.selectedPos) return false
-  const actualR = props.isFlipped ? (9 - displayR) : displayR
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
   return props.selectedPos.r === actualR && props.selectedPos.c === actualC
 }
 
 function isLegalMove(displayR, displayC) {
-  const actualR = props.isFlipped ? (9 - displayR) : displayR
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
   return props.legalMoves.some(m => m.r === actualR && m.c === actualC)
 }
 
 function isLastMoveFrom(displayR, displayC) {
   if (!props.lastMove || !props.lastMove.from) return false
-  const actualR = props.isFlipped ? (9 - displayR) : displayR
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
   return props.lastMove.from.r === actualR && props.lastMove.from.c === actualC
 }
 
 function isLastMoveTo(displayR, displayC) {
   if (!props.lastMove || !props.lastMove.to) return false
-  const actualR = props.isFlipped ? (9 - displayR) : displayR
+  const actualR = props.isFlipped ? displayR : (9 - displayR)
   const actualC = props.isFlipped ? (8 - displayC) : displayC
   return props.lastMove.to.r === actualR && props.lastMove.to.c === actualC
 }
 
 function getCellStyle(displayR, displayC) {
-  // board offsets: 50px top (5% of 1000), 50px left (5.5556% of 900)
-  const topOffset = 5
-  const leftOffset = 5.5555555556
   return {
-    top: `${topOffset + (displayR * 100) / 10}%`,
-    left: `${leftOffset + (displayC * 100) / 9}%`,
+    top: `${(displayR * 100) / 10}%`,
+    left: `${(displayC * 100) / 9}%`,
     width: `${100 / 9}%`,
     height: `${100 / 10}%`
   }
@@ -323,7 +320,7 @@ const variationArrowCoords = computed(() => {
   letter-spacing: 16px;
 
   &.flipped {
-    transform: rotate(180deg);
+    flex-direction: row-reverse;
   }
 }
 
