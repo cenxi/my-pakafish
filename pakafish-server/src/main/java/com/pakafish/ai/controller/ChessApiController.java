@@ -56,7 +56,7 @@ public class ChessApiController {
             pikafishEngineService.stopCurrentSearch();
         }
 
-        log.info("【走棋/分析请求】FEN: {}, useBook: {}, forceEngine: {}, immediate: {}", fen, useBook, forceEngine, immediate);
+        log.info("【走棋/分析请求】FEN: {}, depth: {}, movetime: {}, useBook: {}, forceEngine: {}, immediate: {}", fen, depth, movetime, useBook, forceEngine, immediate);
 
         // 1. 如果启用了开局库且未强制指定纯引擎，先查开局库
         if (!forceEngine) {
