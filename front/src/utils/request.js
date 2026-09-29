@@ -2,8 +2,8 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 const service = axios.create({
-  baseURL: '',
-  timeout: 120000
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
+  timeout: 300000
 })
 
 service.interceptors.request.use(

@@ -51,7 +51,7 @@ public class PikafishEngineService {
      * 【Fix-B2】引擎输出异步读取队列：独立读线程将引擎每行输出放入队列，
      * 分析方法通过 poll(timeout) 消费，彻底避免 readLine() 阻塞导致超时检测失效。
      */
-    private final BlockingQueue<String> engineOutputQueue = new LinkedBlockingQueue<>(4096);
+    private final BlockingQueue<String> engineOutputQueue = new LinkedBlockingQueue<>();
     private Thread engineReaderThread;
 
     /**
@@ -264,18 +264,23 @@ public class PikafishEngineService {
      * 【Fix-B1】去掉 synchronized，改用 ReentrantLock 保护
      */
     public void stopCurrentSearch() {
+        boolean needStop = false;
         lock.lock();
         try {
             if (isSearching) {
-                try {
-                    sendCommandUnsafe("stop");
-                    log.info("【皮卡鱼指令】发送 stop 中断当前活动计算 (会话 #{})", activeSessionId);
-                } catch (Exception e) {
-                    log.warn("发送 stop 异常", e);
-                }
+                needStop = true;
+                // optional: reset searching flag here if appropriate
             }
         } finally {
             lock.unlock();
+        }
+        if (needStop) {
+            try {
+                sendCommandUnsafe("stop");
+                log.info("【皮卡鱼指令】发送 stop 中断当前活动计算 (会话 #{})", activeSessionId);
+            } catch (Exception e) {
+                log.warn("发送 stop 异常", e);
+            }
         }
     }
 
@@ -438,25 +443,40 @@ public class PikafishEngineService {
      * 【Fix-B2】启动独立守护线程持续读取引擎 stdout，放入 BlockingQueue
      */
     private void startEngineReaderThread(BufferedReader reader) {
-        stopEngineReaderThread(); // 先停止旧线程
+        // Ensure any previous reader thread is stopped before starting a new one
+        stopEngineReaderThread();
         engineReaderThread = new Thread(() -> {
             try {
                 String line;
-                while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
-                    // 满了就丢弃最旧的（防止队列溢出）
-                    if (!engineOutputQueue.offer(line, 100, TimeUnit.MILLISECONDS)) {
-                        engineOutputQueue.poll(); // 丢弃一条旧的
-                        engineOutputQueue.offer(line);
+                while (!Thread.currentThread().isInterrupted()) {
+                    // Use ready() to avoid blocking readLine on interrupt
+                    if (reader.ready()) {
+                        line = reader.readLine();
+                        if (line == null) {
+                            // End of stream, exit loop
+                            break;
+                        }
+                        // Offer to queue with timeout; if full, discard oldest entry
+                        if (!engineOutputQueue.offer(line, 100, TimeUnit.MILLISECONDS)) {
+                            engineOutputQueue.poll();
+                            engineOutputQueue.offer(line);
+                        }
+                    } else {
+                        // No data available, sleep briefly to avoid busy-wait
+                        Thread.sleep(50);
                     }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-            } catch (Exception e) {
+            } catch (IOException e) {
                 if (!Thread.currentThread().isInterrupted()) {
                     log.warn("引擎读取线程异常退出: {}", e.getMessage());
                 }
             } finally {
-                try { reader.close(); } catch (Exception ignored) {}
+                try {
+                    reader.close();
+                } catch (Exception ignored) {
+                }
             }
         }, "pikafish-reader");
         engineReaderThread.setDaemon(true);

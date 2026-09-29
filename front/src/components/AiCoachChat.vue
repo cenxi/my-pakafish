@@ -133,7 +133,7 @@
       <el-input
         v-model="inputQuery"
         :placeholder="inputPlaceholder"
-        :disabled="isStreaming || isRecognizing"
+        :disabled="isStreaming && !isRecording"
         @keyup.enter="handleSend"
       >
         <template #prepend>
@@ -182,6 +182,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import axios from 'axios'
 import AiPhoneCallDialog from './AiPhoneCallDialog.vue'
 
@@ -257,6 +258,7 @@ function renderMarkdown(content) {
 
     // 6. 交给 marked 解析主体语法
     let parsed = marked.parse(text)
+    parsed = DOMPurify.sanitize(parsed)
 
     // 7. 清理残留孤立未闭合的 **
     // 7.1 成对 **xxx** -> <strong>xxx</strong>
@@ -641,10 +643,22 @@ function startStreamChat(question) {
     }
   })
 
+  const maxRetries = 3
+  let retryCount = 0
   eventSource.addEventListener('error', (e) => {
     console.warn('SSE stream error or finished', e)
     isStreaming.value = false
     eventSource.close()
+    if (retryCount < maxRetries) {
+      retryCount++
+      const delay = Math.min(5000, 1000 * Math.pow(2, retryCount))
+      ElMessage.error(`SSE 连接中断，${delay}ms 后尝试重新连接（${retryCount}/${maxRetries}）`)
+      setTimeout(() => {
+        startStreamChat(question)
+      }, delay)
+    } else {
+      ElMessage.error('对话中断，请稍后重试。')
+    }
   })
 }
 </script>
