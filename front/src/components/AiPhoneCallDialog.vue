@@ -151,7 +151,11 @@ function openCall() {
 function initWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.hostname || 'localhost'
-  const wsUrl = `${protocol}//${host}:8080/ws/ai-call`
+  let wsUrl = `${protocol}//${host}:8080/ws/ai-call`
+  if (window.location.pathname.startsWith('/chess')) {
+    const port = window.location.port ? `:${window.location.port}` : ''
+    wsUrl = `${protocol}//${host}${port}/chess/ws/ai-call`
+  }
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {

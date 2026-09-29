@@ -51,7 +51,12 @@ public class ChessApiController {
         Boolean useBook = request.containsKey("useBook") ? (Boolean) request.get("useBook") : true;
         Boolean forceEngine = (request.containsKey("forceEngine") && Boolean.TRUE.equals(request.get("forceEngine"))) || !useBook;
 
-        log.info("【走棋/分析请求】FEN: {}, useBook: {}, forceEngine: {}", fen, useBook, forceEngine);
+        Boolean immediate = request.containsKey("immediate") && Boolean.TRUE.equals(request.get("immediate"));
+        if (immediate) {
+            pikafishEngineService.stopCurrentSearch();
+        }
+
+        log.info("【走棋/分析请求】FEN: {}, useBook: {}, forceEngine: {}, immediate: {}", fen, useBook, forceEngine, immediate);
 
         // 1. 如果启用了开局库且未强制指定纯引擎，先查开局库
         if (!forceEngine) {
@@ -115,5 +120,92 @@ public class ChessApiController {
             coachChatService.streamChat(fen, history, question, emitter);
         });
         return emitter;
+    }
+
+    /**
+     * 3. AI 特级大师教练同步问答接口（直接返回字符串，供移动端或简单请求使用）
+     */
+    @PostMapping("/chat")
+    public String chat(@RequestBody Map<String, Object> request) {
+        String fen = (String) request.getOrDefault("fen", "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1");
+        String history = (String) request.getOrDefault("history", "");
+        String question = (String) request.getOrDefault("question", "");
+        return coachChatService.chat(fen, history, question);
+    }
+
+    /**
+     * 4. 实时流式深度推演接口 (SSE)
+     * 引擎 go depth <maxDepth> 持续向下推演，每深入一层推送一条 event: analysis
+     */
+    @GetMapping(value = "/stream-analyze", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamAnalyze(
+            @RequestParam(value = "fen") String fen,
+            @RequestParam(value = "depth", required = false, defaultValue = "30") Integer depth,
+            @RequestParam(value = "useBook", required = false, defaultValue = "true") Boolean useBook) {
+
+        SseEmitter emitter = new SseEmitter(300_000L); // 5分钟
+
+        // 监听客户端主动断开连接或超时，立即 stop 中断引擎推演，释放锁资源！
+        emitter.onCompletion(() -> pikafishEngineService.stopCurrentSearch());
+        emitter.onTimeout(() -> pikafishEngineService.stopCurrentSearch());
+        emitter.onError(e -> pikafishEngineService.stopCurrentSearch());
+
+        Thread.startVirtualThread(() -> {
+            try {
+                // 1. 先查开局库
+                if (Boolean.TRUE.equals(useBook)) {
+                    List<BookMove> bookMoves = openingBookService.getBookMoves(fen);
+                    if (bookMoves != null && !bookMoves.isEmpty()) {
+                        BookMove topMove = bookMoves.get(0);
+                        EngineAnalysisResult bookRes = EngineAnalysisResult.builder()
+                                .bestMove(topMove.getUci())
+                                .bestMoveChinese(topMove.getChinese())
+                                .scoreCp(0)
+                                .winRate(50.0)
+                                .depth(1)
+                                .pvMoves(Collections.singletonList(topMove.getUci()))
+                                .pvMovesChinese(Collections.singletonList(topMove.getChinese()))
+                                .advantageDescription("开局定式（棋逢对手）")
+                                .sideAdvantageText("双方均势 (开局库)")
+                                .fromBook(true)
+                                .bookMoves(bookMoves)
+                                .build();
+                        emitter.send(SseEmitter.event().name("analysis").data(bookRes));
+                        emitter.complete();
+                        return;
+                    }
+                }
+
+                // 2. 启动皮卡鱼流式深算
+                pikafishEngineService.streamAnalyze(fen, depth, snapshot -> {
+                    try {
+                        if (snapshot.getBestMove() != null) {
+                            snapshot.setBestMoveChinese(coordinateConverter.uciToChinese(fen, snapshot.getBestMove()));
+                        }
+                        if (snapshot.getPvMoves() != null) {
+                            snapshot.setPvMovesChinese(coordinateConverter.convertMoveList(fen, snapshot.getPvMoves()));
+                        }
+                        emitter.send(SseEmitter.event().name("analysis").data(snapshot));
+                    } catch (Exception e) {
+                        log.debug("SSE 发送中断: {}", e.getMessage());
+                    }
+                });
+
+                emitter.complete();
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 中断当前推演计算
+     */
+    @PostMapping("/stop-analyze")
+    public Map<String, Object> stopAnalyze() {
+        pikafishEngineService.stopCurrentSearch();
+        return Map.of("ok", true);
     }
 }

@@ -132,18 +132,19 @@
     <div class="chat-footer">
       <el-input
         v-model="inputQuery"
-        placeholder="向大师提问（如：红方能压马吗？对方刚才走这步用意何在？）"
-        :disabled="isStreaming"
+        :placeholder="inputPlaceholder"
+        :disabled="isStreaming || isRecognizing"
         @keyup.enter="handleSend"
       >
         <template #prepend>
           <el-tooltip :content="isRecording ? '点击结束语音录入' : '语音输入 (FunASR)'" placement="top">
             <el-button
               :type="isRecording ? 'danger' : 'default'"
-              :class="{ 'recording-active': isRecording }"
+              :class="{ 'recording-active': isRecording, 'recognizing-active': isRecognizing }"
+              :loading="isRecognizing"
               @click="toggleSpeechInput"
             >
-              <el-icon><Microphone /></el-icon>
+              <el-icon v-if="!isRecognizing"><Microphone /></el-icon>
             </el-button>
           </el-tooltip>
         </template>
@@ -167,7 +168,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import {
   InfoFilled,
   Delete,
@@ -204,6 +205,12 @@ const inputQuery = ref('')
 const isStreaming = ref(false)
 const isExpanded = ref(false)
 const chatBodyRef = ref(null)
+
+const inputPlaceholder = computed(() => {
+  if (isRecording.value) return '正在倾听中... 请清晰说出你的问题，说完可再次点击麦克风'
+  if (isRecognizing.value) return '正在进行语音转写识别，请稍候...'
+  return '向大师提问（如：红方能压马吗？对方刚才走这步用意何在？）'
+})
 
 const messageList = ref([
   {
@@ -296,13 +303,20 @@ let activeAudio = null
 
 // 语音输入（FunASR 录入状态）
 const isRecording = ref(false)
+const isRecognizing = ref(false) // 等待 ASR 最终返回中
 let asrWs = null
 let asrAudioContext = null
 let asrMediaStream = null
 let asrProcessor = null
+let asrSilenceTimer = null
+let asrHasSpoken = false
+let asrCloseTimeout = null
 
-// 获取后端主机地址 (兼容本地与局域网访问)
+// 获取后端主机地址 (兼容本地与局域网、线上统一 /chess 前缀)
 const getApiBaseUrl = () => {
+  if (window.location.pathname.startsWith('/chess')) {
+    return '/chess'
+  }
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
   const host = window.location.hostname || 'localhost'
   return `${protocol}//${host}:8080`
@@ -311,6 +325,10 @@ const getApiBaseUrl = () => {
 const getWsBaseUrl = () => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.hostname || 'localhost'
+  if (window.location.pathname.startsWith('/chess')) {
+    const port = window.location.port ? `:${window.location.port}` : ''
+    return `${protocol}//${host}${port}/chess`
+  }
   return `${protocol}//${host}:8080`
 }
 
@@ -386,8 +404,8 @@ function testCurrentVoice() {
 // 语音输入 (通过 WebSocket 直连 FunASR 识别)
 async function toggleSpeechInput() {
   if (isRecording.value) {
-    stopSpeechInput()
-  } else {
+    finishRecording()
+  } else if (!isRecognizing.value) {
     await startSpeechInput()
   }
 }
@@ -409,9 +427,11 @@ async function startSpeechInput() {
 
     const wsUrl = `${getWsBaseUrl()}/ws/ai-call`
     asrWs = new WebSocket(wsUrl)
+    asrHasSpoken = false
 
     asrWs.onopen = () => {
       isRecording.value = true
+      isRecognizing.value = false
       ElMessage.success('正在录音，请清晰说出你的问题...')
     }
 
@@ -419,10 +439,12 @@ async function startSpeechInput() {
       try {
         const data = JSON.parse(event.data)
         if (data.type === 'asr_partial' || data.type === 'asr_final') {
-          inputQuery.value = data.text
+          if (data.text && data.text.trim()) {
+            inputQuery.value = data.text
+          }
           if (data.type === 'asr_final') {
-            stopSpeechInput()
-            handleSend()
+            isRecognizing.value = false
+            closeAsrWs()
           }
         }
       } catch (e) {}
@@ -440,6 +462,29 @@ async function startSpeechInput() {
     asrProcessor.onaudioprocess = (e) => {
       if (!asrWs || asrWs.readyState !== WebSocket.OPEN) return
       const input = e.inputBuffer.getChannelData(0)
+
+      // 计算音量能量判断是否说话与停顿
+      let sum = 0
+      for (let i = 0; i < input.length; i++) {
+        sum += input[i] * input[i]
+      }
+      const rms = Math.sqrt(sum / input.length)
+
+      if (rms > 0.015) {
+        asrHasSpoken = true
+        if (asrSilenceTimer) {
+          clearTimeout(asrSilenceTimer)
+          asrSilenceTimer = null
+        }
+      } else if (asrHasSpoken && !asrSilenceTimer) {
+        // 用户说话后停顿 1.2 秒，自动结束录音并转写填入输入框
+        asrSilenceTimer = setTimeout(() => {
+          if (isRecording.value) {
+            finishRecording()
+          }
+        }, 1200)
+      }
+
       const pcm16 = new Int16Array(input.length)
       for (let i = 0; i < input.length; i++) {
         let s = Math.max(-1, Math.min(1, input[i]))
@@ -457,8 +502,17 @@ async function startSpeechInput() {
   }
 }
 
-function stopSpeechInput() {
+// 正常结束录制：停麦克风推流，发 end_audio，保持 WS 等待最终文字返回
+function finishRecording() {
   isRecording.value = false
+  isRecognizing.value = true
+
+  if (asrSilenceTimer) {
+    clearTimeout(asrSilenceTimer)
+    asrSilenceTimer = null
+  }
+
+  // 释放麦克风硬件采集资源
   if (asrProcessor) {
     asrProcessor.disconnect()
     asrProcessor = null
@@ -471,13 +525,57 @@ function stopSpeechInput() {
     asrMediaStream.getTracks().forEach(t => t.stop())
     asrMediaStream = null
   }
-  if (asrWs) {
+
+  // 通知服务端音频推流已结束，触发最终文字解码
+  if (asrWs && asrWs.readyState === WebSocket.OPEN) {
     try {
       asrWs.send(JSON.stringify({ type: 'end_audio' }))
     } catch (e) {}
-    asrWs.close()
+
+    // 设置 3 秒兜底超时关闭 WS
+    if (asrCloseTimeout) clearTimeout(asrCloseTimeout)
+    asrCloseTimeout = setTimeout(() => {
+      isRecognizing.value = false
+      closeAsrWs()
+    }, 3000)
+  } else {
+    isRecognizing.value = false
+  }
+}
+
+function closeAsrWs() {
+  if (asrCloseTimeout) {
+    clearTimeout(asrCloseTimeout)
+    asrCloseTimeout = null
+  }
+  if (asrWs) {
+    try {
+      asrWs.close()
+    } catch (e) {}
     asrWs = null
   }
+}
+
+function stopSpeechInput() {
+  isRecording.value = false
+  isRecognizing.value = false
+  if (asrSilenceTimer) {
+    clearTimeout(asrSilenceTimer)
+    asrSilenceTimer = null
+  }
+  if (asrProcessor) {
+    asrProcessor.disconnect()
+    asrProcessor = null
+  }
+  if (asrAudioContext) {
+    asrAudioContext.close().catch(() => {})
+    asrAudioContext = null
+  }
+  if (asrMediaStream) {
+    asrMediaStream.getTracks().forEach(t => t.stop())
+    asrMediaStream = null
+  }
+  closeAsrWs()
 }
 
 function handleClearChat() {

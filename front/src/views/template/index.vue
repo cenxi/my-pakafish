@@ -3,8 +3,11 @@
     <!-- 1. 顶部操作工具栏 -->
     <header class="top-toolbar">
       <div class="logo-area">
-        <span class="logo-icon">🐟</span>
-        <span class="logo-title">皮卡鱼·AI象棋特大</span>
+        <div class="wuhan-seal-logo-pc">楚</div>
+        <div class="logo-text-group">
+          <span class="logo-title">楚赢象棋</span>
+          <span class="logo-badge-text">特级大师私教</span>
+        </div>
       </div>
 
       <div class="toolbar-buttons">
@@ -61,9 +64,9 @@
               <div v-if="depthPreset === 'custom'" class="custom-slider-box">
                 <div class="slider-row">
                   <div class="slider-label">
-                    <span>目标深度：<strong>{{ searchDepth }}</strong> 层</span>
+                    <span>目标深度：<strong>{{ searchDepth }}</strong> 层 (最高支持 128 层极限深算)</span>
                   </div>
-                  <el-slider v-model="searchDepth" :min="10" :max="60" :step="2" show-input @change="triggerPikafishAnalyze" />
+                  <el-slider v-model="searchDepth" :min="10" :max="128" :step="2" show-input @change="triggerPikafishAnalyze" />
                 </div>
                 <div class="slider-row mt-2">
                   <div class="slider-label">
@@ -146,6 +149,16 @@
               @click="showEnginePanel = !showEnginePanel"
             >
               引擎面板
+            </el-button>
+          </el-tooltip>
+          <el-tooltip content="体验全新移动端 / 手机界面" placement="bottom">
+            <el-button
+              size="small"
+              type="warning"
+              plain
+              @click="$router.push('/mobile')"
+            >
+              📱 手机版
             </el-button>
           </el-tooltip>
         </el-button-group>
@@ -400,7 +413,7 @@ const openingPresets = ref([
 
 async function fetchOpeningPresets() {
   try {
-    const resp = await axios.get('http://localhost:8080/api/chess/opening-presets')
+    const resp = await axios.get('${getApiBaseUrl()}/api/chess/opening-presets')
     if (resp.data && resp.data.length > 0) {
       openingPresets.value = [
         {
@@ -672,8 +685,8 @@ const showEnginePanel = ref(true)
 // 动态推演深度与算力档位
 const depthPreset = ref('standard')
 const searchDepth = ref(20)
-const searchMovetimeSec = ref(1.5)
-const searchMovetime = ref(1500)
+const searchMovetimeSec = ref(1.0)
+const searchMovetime = ref(1000)
 
 const currentPresetLabel = computed(() => {
   switch (depthPreset.value) {
@@ -687,16 +700,16 @@ const currentPresetLabel = computed(() => {
 function onPresetChange(val) {
   if (val === 'fast') {
     searchDepth.value = 15
-    searchMovetimeSec.value = 0.8
-    searchMovetime.value = 800
+    searchMovetimeSec.value = 1.0
+    searchMovetime.value = 1000
   } else if (val === 'standard') {
     searchDepth.value = 20
-    searchMovetimeSec.value = 1.5
-    searchMovetime.value = 1500
+    searchMovetimeSec.value = 1.0
+    searchMovetime.value = 1000
   } else if (val === 'master') {
     searchDepth.value = 30
-    searchMovetimeSec.value = 1.5
-    searchMovetime.value = 1500
+    searchMovetimeSec.value = 1.0
+    searchMovetime.value = 1000
   }
   triggerPikafishAnalyze()
 }
@@ -819,6 +832,15 @@ const advantageBarStyle = computed(() => {
   }
 })
 
+const getApiBaseUrl = () => {
+  if (window.location.pathname.startsWith('/chess')) {
+    return '/chess'
+  }
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+  const host = window.location.hostname || 'localhost'
+  return `${protocol}//${host}:8080`
+}
+
 onMounted(() => {
   fetchOpeningPresets()
   triggerPikafishAnalyze()
@@ -908,6 +930,7 @@ function executeMove(from, to) {
   currentTurn.value = moveTurn === 'r' ? 'b' : 'r'
   const newFen = boardToFen(boardState.value, currentTurn.value)
   currentFen.value = newFen
+  stopPcSseAnalyze() // 走子先停掉旧 SSE 推演流
 
   lastMoveHighlight.value = { from, to }
 
@@ -943,50 +966,87 @@ function executeMove(from, to) {
     gameOverInfo.value = ''
   }
 
-  // 如果轮到引擎执子，直接让引擎计算并落子（不再重复发起纯分析）
+  // 如果轮到引擎执子，直接让引擎计算并在规定时间内落子
   if (engineSide.value && engineSide.value === currentTurn.value) {
-    setTimeout(() => {
-      triggerEngineBestMove()
-    }, 400)
+    triggerEngineBestMove()
   } else {
-    triggerPikafishAnalyze()
+    // 轮到对手走棋（或者双人对弈），引擎不停止分析，通过 SSE 单连接持续接收推演流
+    startPcSseAnalyze()
   }
 }
 
-// 调度皮卡鱼后端接口分析
-async function triggerPikafishAnalyze() {
-  if (!isAnalysisMode.value) {
-    // 若分析模式关闭，不浪费资源频繁计算分析
-    return
+// 对手思考时的持续深度推演控制 (采用单连接 SSE 机制，彻底杜绝轮询！)
+let pcSseSource = null
+
+function stopPcSseAnalyze() {
+  if (pcSseSource) {
+    try {
+      pcSseSource.close()
+    } catch (e) {}
+    pcSseSource = null
   }
+}
+
+function startPcSseAnalyze() {
+  if (!isAnalysisMode.value) return
+  stopPcSseAnalyze()
+
+  const fen = currentFen.value
+  const targetDepth = searchDepth.value || 20
+  const url = `${getApiBaseUrl()}/api/chess/stream-analyze?fen=${encodeURIComponent(fen)}&depth=${targetDepth}&useBook=${useOpeningBook.value}`
+
   isAnalyzing.value = true
   try {
-    const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
-      fen: currentFen.value,
-      depth: searchDepth.value,
-      movetime: searchMovetime.value,
-      useBook: useOpeningBook.value
+    pcSseSource = new EventSource(url)
+
+    pcSseSource.addEventListener('analysis', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data && currentFen.value === fen) {
+          engineResult.value = data
+        }
+      } catch (e) {}
     })
-    engineResult.value = resp.data
-  } catch (err) {
-    console.error('皮卡鱼分析接口调用失败:', err)
-  } finally {
+
+    pcSseSource.onerror = () => {
+      stopPcSseAnalyze()
+      isAnalyzing.value = false
+    }
+  } catch (e) {
     isAnalyzing.value = false
   }
 }
 
+// 调度皮卡鱼分析
+function triggerPikafishAnalyze() {
+  startPcSseAnalyze()
+}
+
+let isPcEngineMoving = false
+
 async function triggerEngineBestMove() {
-  if (currentTurn.value !== (engineSide.value || currentTurn.value)) return
+  if (isPcEngineMoving) return
+  isPcEngineMoving = true
+
+  stopPcSseAnalyze() // 立即中断对手思考推演
+  if (currentTurn.value !== (engineSide.value || currentTurn.value)) {
+    isPcEngineMoving = false
+    return
+  }
 
   isAnalyzing.value = true
+  const moveFen = currentFen.value
   try {
-    const resp = await axios.post('http://localhost:8080/api/chess/analyze', {
-      fen: currentFen.value,
+    const resp = await axios.post(`${getApiBaseUrl()}/api/chess/analyze`, {
+      fen: moveFen,
       depth: searchDepth.value,
-      movetime: searchMovetime.value,
+      movetime: searchMovetime.value || 1000,
+      immediate: true,
       useBook: useOpeningBook.value
     })
     engineResult.value = resp.data
+
+    if (currentFen.value !== moveFen) return
 
     const best = engineResult.value?.bestMove
     if (!best || best.length < 4) {
@@ -1017,19 +1077,22 @@ async function triggerEngineBestMove() {
     console.error('引擎出招异常:', err)
   } finally {
     isAnalyzing.value = false
+    isPcEngineMoving = false
   }
 }
 
 function toggleEngineSide(side) {
   if (engineSide.value === side) {
     engineSide.value = null
+    stopPcSseAnalyze()
   } else {
     engineSide.value = side
-    // 如果当前轮到引擎走棋（例如开局点击“引擎执红”，红方先行），立即出招
+    // 如果当前轮到引擎走棋（例如开局点击“引擎执红”，红方先行），立即在指定时间内出招
     if (engineSide.value === currentTurn.value) {
-      setTimeout(() => {
-        triggerEngineBestMove()
-      }, 300)
+      triggerEngineBestMove()
+    } else {
+      // 否则当前是人类思考，引擎立刻开启持续深算
+      startPcSseAnalyze()
     }
   }
 }
@@ -1147,13 +1210,41 @@ function copyFen() {
   .logo-area {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 16px;
-    font-weight: bold;
-    color: #1f2329;
+    gap: 10px;
     flex-shrink: 0;
-    .logo-icon {
-      font-size: 22px;
+
+    .wuhan-seal-logo-pc {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, #fde047 0%, #f59e0b 55%, #d97706 100%);
+      border-radius: 7px;
+      border: 1.5px solid #fef08a;
+      box-shadow: 0 2px 8px rgba(245, 158, 11, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #b91c1c;
+      font-size: 18px;
+      font-weight: 900;
+      font-family: 'STKaiti', 'Kaiti', 'KaiTi_GB2312', serif;
+      letter-spacing: -1px;
+    }
+
+    .logo-text-group {
+      display: flex;
+      flex-direction: column;
+
+      .logo-title {
+        font-size: 16px;
+        font-weight: 800;
+        color: #1f2329;
+        line-height: 1.2;
+      }
+      .logo-badge-text {
+        font-size: 10px;
+        color: #b45309;
+        font-weight: 600;
+      }
     }
   }
 

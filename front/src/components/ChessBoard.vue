@@ -269,10 +269,19 @@ const variationArrowCoords = computed(() => {
   width: 100%;
   max-width: 580px;
   aspect-ratio: 9 / 10;
-  padding: 12px;
-  background: #deb887;
-  border-radius: 8px;
-  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
+  padding: 10px;
+  background-color: #d69f62;
+  background-image: 
+    radial-gradient(ellipse at 50% 50%, rgba(255,255,255,0.15) 0%, rgba(0,0,0,0.12) 100%),
+    repeating-linear-gradient(0deg, rgba(140, 85, 35, 0.05) 0px, rgba(140, 85, 35, 0.05) 1px, transparent 1px, transparent 4px),
+    linear-gradient(180deg, #c99355 0%, #deb887 50%, #bd8748 100%);
+  border-radius: 12px;
+  box-shadow: 
+    inset 0 1px 2px rgba(255, 255, 255, 0.6),
+    inset 0 -3px 6px rgba(80, 45, 15, 0.4),
+    0 12px 36px rgba(0, 0, 0, 0.5),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  border: 3.5px solid #75441d;
   box-sizing: border-box;
   display: flex;
   position: relative;
@@ -282,9 +291,14 @@ const variationArrowCoords = computed(() => {
   position: relative;
   width: 100%;
   height: 100%;
-  background: #f4d090;
-  border: 3px solid #684a28;
-  border-radius: 4px;
+  background-color: #ebb87c;
+  background-image: 
+    radial-gradient(ellipse at 50% 50%, rgba(255,255,255,0.2) 0%, rgba(0,0,0,0.06) 100%),
+    repeating-linear-gradient(90deg, rgba(140, 90, 40, 0.03) 0px, rgba(140, 90, 40, 0.03) 1px, transparent 1px, transparent 6px),
+    linear-gradient(180deg, #e5b376 0%, #f0c388 50%, #dea968 100%);
+  border: 2px solid #825027;
+  border-radius: 6px;
+  box-shadow: inset 0 0 12px rgba(110, 65, 20, 0.25);
 }
 
 .river-text {
@@ -296,12 +310,14 @@ const variationArrowCoords = computed(() => {
   display: flex;
   justify-content: space-around;
   align-items: center;
-  font-family: 'Kaiti', 'STKaiti', serif;
-  font-size: 26px;
-  font-weight: 600;
-  color: #7a5833;
+  font-family: 'STKaiti', 'Kaiti', 'KaiTi_GB2312', serif;
+  font-size: 28px;
+  font-weight: 700;
+  color: rgba(115, 68, 30, 0.65);
+  text-shadow: 1px 1px 1px rgba(255, 255, 255, 0.5);
   pointer-events: none;
   z-index: 1;
+  letter-spacing: 16px;
 
   &.flipped {
     transform: rotate(180deg);
@@ -400,61 +416,73 @@ const variationArrowCoords = computed(() => {
   z-index: 4;
 }
 
+/* 拟真实木雕刻棋子 (高保真还原实木立体质感) */
 .chess-piece {
-  width: 84%;
-  height: 84%;
+  width: 86%;
+  height: 86%;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.35), inset 0 2px 3px rgba(255, 255, 255, 0.6);
-  transition: transform 0.15s ease;
+  /* 拟真实木纹理：斜切高光 + 沉重木质软阴影 */
+  background: radial-gradient(circle at 35% 30%, #fffbf2 0%, #f6dfb8 42%, #d6a76c 82%, #b58040 100%);
+  box-shadow: 
+    0 4px 10px rgba(0, 0, 0, 0.45),
+    0 1px 3px rgba(0, 0, 0, 0.3),
+    inset 0 1.5px 2px rgba(255, 255, 255, 0.85),
+    inset 0 -2px 3px rgba(100, 55, 15, 0.5);
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
   z-index: 3;
 
   &.selected {
-    transform: scale(1.08);
+    transform: scale(1.12);
+    box-shadow: 
+      0 0 0 2px #ffffff,
+      0 0 16px rgba(255, 255, 255, 0.9),
+      0 8px 18px rgba(0, 0, 0, 0.55);
   }
 
   &.last-moved {
-    box-shadow: 0 0 16px rgba(64, 158, 255, 0.8), 0 4px 8px rgba(0, 0, 0, 0.35);
+    box-shadow: 
+      0 0 14px rgba(59, 130, 246, 0.8),
+      0 5px 12px rgba(0, 0, 0, 0.4);
   }
 
+  /* 棋子表面凹雕同心圆圈线 */
   .piece-inner {
-    width: 84%;
-    height: 84%;
+    width: 80%;
+    height: 80%;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    border: 1.5px solid;
+    border: 1px solid rgba(139, 90, 43, 0.4);
+    box-shadow: 
+      inset 0 0.5px 1px rgba(255, 255, 255, 0.5),
+      0 0.5px 1px rgba(0, 0, 0, 0.2);
   }
 
   .piece-char {
-    font-family: 'Kaiti', 'STKaiti', serif;
-    font-size: 24px;
-    font-weight: bold;
+    font-family: 'STKaiti', 'Kaiti', 'KaiTi_GB2312', serif;
+    font-size: 26px;
+    font-weight: 700;
     user-select: none;
+    line-height: 1;
   }
 
+  /* 红棋：朱砂红刻字 + 阴影 */
   &.r {
-    background: radial-gradient(circle at 35% 35%, #fff0f0, #e64545 65%, #991b1b);
-    .piece-inner {
-      border-color: #ffe4e4;
-    }
     .piece-char {
-      color: #fff;
-      text-shadow: 0 1px 2px #7f1d1d;
+      color: #b91c1c;
+      text-shadow: 0 1px 1px rgba(255, 255, 255, 0.65), 0 -0.5px 1px rgba(127, 29, 29, 0.3);
     }
   }
 
+  /* 黑棋：金石苍劲墨黑 + 阴影 */
   &.b {
-    background: radial-gradient(circle at 35% 35%, #555555, #222222 70%, #000000);
-    .piece-inner {
-      border-color: #888888;
-    }
     .piece-char {
-      color: #ffffff;
-      text-shadow: 0 1px 2px #000;
+      color: #1c1917;
+      text-shadow: 0 1px 1px rgba(255, 255, 255, 0.65), 0 -0.5px 1px rgba(0, 0, 0, 0.4);
     }
   }
 }

@@ -131,4 +131,56 @@ public class ChessCoachChatService {
         }
         return sb.toString();
     }
+
+    /**
+     * 同步非流式解答（供移动端或单次请求调用）
+     */
+    public String chat(String fen, String history, String userQuestion) {
+        java.util.concurrent.CompletableFuture<String> future = new java.util.concurrent.CompletableFuture<>();
+        StringBuilder sb = new StringBuilder();
+
+        EngineAnalysisResult engineResult = pikafishEngineService.analyzePosition(fen, 1000);
+        if (engineResult != null && engineResult.getBestMove() != null) {
+            engineResult.setBestMoveChinese(coordinateConverter.uciToChinese(fen, engineResult.getBestMove()));
+            engineResult.setPvMovesChinese(coordinateConverter.convertMoveList(fen, engineResult.getPvMoves()));
+        }
+
+        String context = buildContext(fen, history, engineResult);
+        String promptContent = String.format("""
+            %s
+            
+            【学员提问/诉求】：%s
+            
+            请作为特级大师教练，结合上述整盘对局历史、当前盘面与皮卡鱼客观深度算力，为学员进行专业全面的复盘、思路剖析与战术解答：
+            """, context, (userQuestion == null || userQuestion.isBlank()) ? "请结合整盘历史与当前盘面，全面复盘局势并讲解最佳应对计划。" : userQuestion);
+
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(SystemMessage.from(SYSTEM_PROMPT));
+        messages.add(UserMessage.from(promptContent));
+
+        streamingChatModel.generate(messages, new StreamingResponseHandler<>() {
+            @Override
+            public void onNext(String token) {
+                sb.append(token);
+            }
+
+            @Override
+            public void onComplete(Response<AiMessage> response) {
+                future.complete(sb.toString());
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                log.error("LLM 同步生成出错", error);
+                future.completeExceptionally(error);
+            }
+        });
+
+        try {
+            return future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("获取特大回复超时或异常", e);
+            return "特级大师正在沉思局势，建议先巩固子力，走稳当前步调。";
+        }
+    }
 }

@@ -9,10 +9,10 @@ import org.springframework.stereotype.Service;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,7 +42,22 @@ public class PikafishEngineService {
     private BufferedWriter engineWriter;
     private BufferedReader engineReader;
 
-    private final Object lock = new Object();
+    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+    private volatile boolean isSearching = false;
+
+    /**
+     * 强行中断当前正在运行的推演（使引擎立即吐出当前深度的 bestmove）
+     */
+    public void stopCurrentSearch() {
+        if (isSearching) {
+            try {
+                sendCommand("stop");
+                log.info("【皮卡鱼指令】已发送 stop 中断当前计算");
+            } catch (Exception e) {
+                log.warn("发送 stop 异常", e);
+            }
+        }
+    }
 
     @PostConstruct
     public void init() {
@@ -73,7 +88,6 @@ public class PikafishEngineService {
         sendCommand("setoption name Hash value " + hashSize);
         sendCommand("isready");
 
-        // 等待 readyok
         String line;
         while ((line = engineReader.readLine()) != null) {
             if ("readyok".equals(line.trim())) {
@@ -90,144 +104,238 @@ public class PikafishEngineService {
         }
     }
 
+    // --------------- 编译模式常量 ---------------
+    private static final Pattern DEPTH_PATTERN = Pattern.compile("\\bdepth\\s+(\\d+)");
+    private static final Pattern SCORE_CP_PATTERN = Pattern.compile("\\bscore\\s+cp\\s+(-?\\d+)");
+    private static final Pattern SCORE_MATE_PATTERN = Pattern.compile("\\bscore\\s+mate\\s+(-?\\d+)");
+    private static final Pattern PV_PATTERN = Pattern.compile("\\bpv\\s+(.*)$");
+    private static final Pattern SELDEPTH_PATTERN = Pattern.compile("\\bseldepth\\s+(\\d+)");
+
     public EngineAnalysisResult analyzePosition(String fen, Integer movetimeLimit) {
         return analyzePosition(fen, null, movetimeLimit);
     }
 
     /**
-     * 同步分析当前 FEN 局面 (支持动态指定深度与思考时间)
-     *
-     * @param fen FEN 局面串
-     * @param depthLimit 目标推演深度（层），若<=0则不限深度或使用默认
-     * @param movetimeLimit 思考限时(ms)，若<=0则使用默认
-     * @return 引擎分析结果
+     * 同步分析（原有接口保留，用于单次出招）
      */
     public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit) {
-        synchronized (lock) {
-            try {
-                if (engineProcess == null || !engineProcess.isAlive()) {
-                    log.warn("皮卡鱼引擎进程未存活，正在重新拉起...");
-                    startEngine();
+        // 抢占式：如果正在进行后台推演，先发 stop 唤醒并抢锁
+        if (isSearching) {
+            stopCurrentSearch();
+        }
+
+        try {
+            if (!lock.tryLock(5, TimeUnit.SECONDS)) {
+                log.warn("获取皮卡鱼引擎锁超时，强制 stop");
+                stopCurrentSearch();
+                if (!lock.tryLock(3, TimeUnit.SECONDS)) {
+                    log.error("二次获取锁失败");
+                    return null;
                 }
-
-                sendCommand("position fen " + fen);
-
-                StringBuilder goCmd = new StringBuilder("go");
-                if (depthLimit != null && depthLimit > 0) {
-                    goCmd.append(" depth ").append(depthLimit);
-                }
-                if (movetimeLimit != null && movetimeLimit > 0) {
-                    goCmd.append(" movetime ").append(movetimeLimit);
-                } else if (depthLimit == null || depthLimit <= 0) {
-                    goCmd.append(" movetime ").append(defaultMovetime);
-                }
-
-                sendCommand(goCmd.toString());
-
-                EngineAnalysisResult result = new EngineAnalysisResult();
-                String line;
-                String lastPvLine = null;
-
-                Pattern depthPattern = Pattern.compile("\\bdepth\\s+(\\d+)");
-                Pattern scoreCpPattern = Pattern.compile("\\bscore\\s+cp\\s+(-?\\d+)");
-                Pattern scoreMatePattern = Pattern.compile("\\bscore\\s+mate\\s+(-?\\d+)");
-                Pattern pvPattern = Pattern.compile("\\bpv\\s+(.*)$");
-
-                while ((line = engineReader.readLine()) != null) {
-                    line = line.trim();
-                    if (line.startsWith("info ")) {
-                        Matcher mDepth = depthPattern.matcher(line);
-                        if (mDepth.find()) {
-                            result.setDepth(Integer.parseInt(mDepth.group(1)));
-                        }
-
-                        Matcher mScore = scoreCpPattern.matcher(line);
-                        if (mScore.find()) {
-                            int cp = Integer.parseInt(mScore.group(1));
-                            result.setScoreCp(cp);
-                            result.setWinRate(calculateWinRate(cp));
-                        } else {
-                            Matcher mMate = scoreMatePattern.matcher(line);
-                            if (mMate.find()) {
-                                int mateIn = Integer.parseInt(mMate.group(1));
-                                int cp = mateIn > 0 ? 30000 - mateIn * 100 : -30000 - mateIn * 100;
-                                result.setScoreCp(cp);
-                                result.setWinRate(mateIn > 0 ? 99.9 : 0.1);
-                            }
-                        }
-
-                        Matcher mPv = pvPattern.matcher(line);
-                        if (mPv.find()) {
-                            lastPvLine = mPv.group(1);
-                        }
-                    } else if (line.startsWith("bestmove ")) {
-                        String[] parts = line.split("\\s+");
-                        if (parts.length >= 2) {
-                            result.setBestMove(parts[1]);
-                        }
-                        break;
-                    }
-                }
-
-                if (lastPvLine != null) {
-                    result.setPvMoves(Arrays.asList(lastPvLine.split("\\s+")));
-                } else if (result.getBestMove() != null) {
-                    result.setPvMoves(List.of(result.getBestMove()));
-                }
-
-                // 局势优势描述
-                if (result.getScoreCp() != null) {
-                    // 正确解析红黑绝对分值：
-                    // 皮卡鱼引擎输出的 score cp 是相对于【当前执棋方】的！
-                    // 1) 如果当前轮到红方走 (fen 含 'w')，引擎返回的 cp 就是红方分值（正为红优，负为红劣/黑优）；
-                    // 2) 如果当前轮到黑方走 (fen 含 'b')，引擎返回的 cp 是黑方视角的优势值！
-                    //    因此转化为红方的绝对分值时，必须取反：redScore = -cp！
-                    boolean isRedTurn = !fen.contains(" b ");
-                    int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
-
-                    // 将绝对基准分赋回 result
-                    result.setScoreCp(redScore);
-
-                    String sideText;
-                    String statusDesc;
-                    if (redScore == 0) {
-                        sideText = "均势 (0分)";
-                        statusDesc = "局势胶着，均势抗衡";
-                    } else if (redScore > 0) {
-                        sideText = "红优 +" + redScore + "分";
-                        statusDesc = formatAdvantageText(redScore, "红方");
-                    } else {
-                        sideText = "黑优 +" + Math.abs(redScore) + "分";
-                        statusDesc = formatAdvantageText(Math.abs(redScore), "黑方");
-                    }
-                    result.setSideAdvantageText(sideText);
-                    result.setAdvantageDescription(statusDesc);
-                }
-
-                return result;
-            } catch (Exception e) {
-                log.error("皮卡鱼分析异常", e);
-                return null;
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+
+        try {
+            ensureEngine();
+            sendCommand("position fen " + fen);
+
+            StringBuilder goCmd = new StringBuilder("go");
+            if (depthLimit != null && depthLimit > 0) {
+                goCmd.append(" depth ").append(depthLimit);
+            }
+            if (movetimeLimit != null && movetimeLimit > 0) {
+                goCmd.append(" movetime ").append(movetimeLimit);
+            } else if (depthLimit == null || depthLimit <= 0) {
+                goCmd.append(" movetime ").append(defaultMovetime);
+            }
+
+            sendCommand(goCmd.toString());
+            isSearching = true;
+
+            EngineAnalysisResult result = readUntilBestmove(fen, null);
+            isSearching = false;
+            return result;
+        } catch (Exception e) {
+            isSearching = false;
+            log.error("皮卡鱼分析异常", e);
+            return null;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * 流式分析（SSE 模式）：发送 go depth <maxDepth>，每推深一层通过 callback 推送中间结果，
+     * 具备抢占式中断能力，新请求进入时自动打断旧推演释放锁。
+     */
+    public EngineAnalysisResult streamAnalyze(String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
+        // 抢占式：如果正在运行前一个推演，立刻 stop 中断它
+        if (isSearching) {
+            stopCurrentSearch();
+        }
+
+        try {
+            if (!lock.tryLock(5, TimeUnit.SECONDS)) {
+                log.warn("获取流式推演锁超时，强行 stop 并重试");
+                stopCurrentSearch();
+                if (!lock.tryLock(3, TimeUnit.SECONDS)) {
+                    log.error("二次获取流式推演锁失败");
+                    return null;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+
+        try {
+            ensureEngine();
+            sendCommand("position fen " + fen);
+            sendCommand("go depth " + Math.max(maxDepth, 15));
+            isSearching = true;
+
+            EngineAnalysisResult result = readUntilBestmove(fen, onProgress);
+            isSearching = false;
+            return result;
+        } catch (Exception e) {
+            isSearching = false;
+            log.error("皮卡鱼流式分析异常", e);
+            return null;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * 从引擎输出流中持续读取 info 行，解析并回调，直到遇到 bestmove。
+     * @param onProgress 若非 null，每次 info depth 行解析后回调推送中间结果
+     */
+    private EngineAnalysisResult readUntilBestmove(String fen, Consumer<EngineAnalysisResult> onProgress) throws IOException {
+        EngineAnalysisResult result = new EngineAnalysisResult();
+        String lastPvLine = null;
+        int lastReportedDepth = 0;
+
+        String line;
+        while ((line = engineReader.readLine()) != null) {
+            line = line.trim();
+            if (line.startsWith("info ")) {
+                // 跳过 upperbound/lowerbound 的非最终行
+                if (line.contains(" upperbound") || line.contains(" lowerbound")) continue;
+
+                Matcher mDepth = DEPTH_PATTERN.matcher(line);
+                if (mDepth.find()) {
+                    result.setDepth(Integer.parseInt(mDepth.group(1)));
+                }
+
+                Matcher mScore = SCORE_CP_PATTERN.matcher(line);
+                if (mScore.find()) {
+                    int cp = Integer.parseInt(mScore.group(1));
+                    result.setScoreCp(cp);
+                    result.setWinRate(calculateWinRate(cp));
+                } else {
+                    Matcher mMate = SCORE_MATE_PATTERN.matcher(line);
+                    if (mMate.find()) {
+                        int mateIn = Integer.parseInt(mMate.group(1));
+                        int cp = mateIn > 0 ? 30000 - mateIn * 100 : -30000 - mateIn * 100;
+                        result.setScoreCp(cp);
+                        result.setWinRate(mateIn > 0 ? 99.9 : 0.1);
+                    }
+                }
+
+                Matcher mPv = PV_PATTERN.matcher(line);
+                if (mPv.find()) {
+                    lastPvLine = mPv.group(1);
+                    result.setPvMoves(Arrays.asList(lastPvLine.split("\\s+")));
+                    if (!result.getPvMoves().isEmpty()) {
+                        result.setBestMove(result.getPvMoves().get(0));
+                    }
+                }
+
+                // 有新的完整深度数据时回调
+                if (onProgress != null && result.getDepth() != null && result.getDepth() > lastReportedDepth
+                        && result.getScoreCp() != null) {
+                    lastReportedDepth = result.getDepth();
+                    // 构建中间快照（含红黑绝对分值转换）
+                    EngineAnalysisResult snapshot = buildSnapshot(result, fen);
+                    try {
+                        onProgress.accept(snapshot);
+                    } catch (Exception ignored) {
+                        // SSE 客户端断开，忽略
+                    }
+                }
+            } else if (line.startsWith("bestmove ")) {
+                String[] parts = line.split("\\s+");
+                if (parts.length >= 2) {
+                    result.setBestMove(parts[1]);
+                }
+                break;
+            }
+        }
+
+        if (lastPvLine != null) {
+            result.setPvMoves(Arrays.asList(lastPvLine.split("\\s+")));
+        } else if (result.getBestMove() != null) {
+            result.setPvMoves(List.of(result.getBestMove()));
+        }
+
+        // 转换为红方绝对分值
+        applyAbsoluteScore(result, fen);
+        return result;
+    }
+
+    /** 构建中间快照用于 SSE 推送 */
+    private EngineAnalysisResult buildSnapshot(EngineAnalysisResult src, String fen) {
+        EngineAnalysisResult snap = new EngineAnalysisResult();
+        snap.setDepth(src.getDepth());
+        snap.setScoreCp(src.getScoreCp());
+        snap.setWinRate(src.getWinRate());
+        snap.setBestMove(src.getBestMove());
+        snap.setPvMoves(src.getPvMoves());
+        snap.setFromBook(false);
+        applyAbsoluteScore(snap, fen);
+        return snap;
+    }
+
+    /** 将引擎返回的相对分值转换为红方绝对分值并填充文字描述 */
+    private void applyAbsoluteScore(EngineAnalysisResult result, String fen) {
+        if (result.getScoreCp() == null) return;
+        boolean isRedTurn = !fen.contains(" b ");
+        int redScore = isRedTurn ? result.getScoreCp() : -result.getScoreCp();
+        result.setScoreCp(redScore);
+        result.setWinRate(calculateWinRate(isRedTurn ? result.getScoreCp() : -result.getScoreCp()));
+
+        if (redScore == 0) {
+            result.setSideAdvantageText("均势 (0分)");
+            result.setAdvantageDescription("局势胶着，均势抗衡");
+        } else if (redScore > 0) {
+            result.setSideAdvantageText("红优 +" + redScore + "分");
+            result.setAdvantageDescription(formatAdvantageText(redScore, "红方"));
+        } else {
+            result.setSideAdvantageText("黑优 +" + Math.abs(redScore) + "分");
+            result.setAdvantageDescription(formatAdvantageText(Math.abs(redScore), "黑方"));
+        }
+    }
+
+    private void ensureEngine() throws IOException {
+        if (engineProcess == null || !engineProcess.isAlive()) {
+            log.warn("皮卡鱼引擎进程未存活，正在重新拉起...");
+            startEngine();
         }
     }
 
     private double calculateWinRate(int cp) {
-        // 基于经典 Elo 胜率公式映射
         double winRate = 1.0 / (1.0 + Math.pow(10.0, -cp / 400.0));
         return Math.round(winRate * 1000.0) / 10.0;
     }
 
     private String formatAdvantageText(int score, String dominantSide) {
-        if (score <= 50) {
-            return dominantSide + "稍占主动";
-        } else if (score <= 200) {
-            return dominantSide + "握有微弱优势";
-        } else if (score <= 600) {
-            return dominantSide + "握有明显优势";
-        } else {
-            return dominantSide + "胜券在握 (胜势)";
-        }
+        if (score <= 50) return dominantSide + "稍占主动";
+        else if (score <= 200) return dominantSide + "握有微弱优势";
+        else if (score <= 600) return dominantSide + "握有明显优势";
+        else return dominantSide + "胜券在握 (胜势)";
     }
 
     @PreDestroy

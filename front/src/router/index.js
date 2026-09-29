@@ -4,20 +4,31 @@ import 'nprogress/nprogress.css'
 
 NProgress.configure({ showSpinner: false })
 
+const isMobileDevice = () => {
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+    || window.innerWidth <= 768
+}
+
 const routes = [
   {
     path: '/',
-    redirect: '/chess'
+    redirect: () => (isMobileDevice() ? '/mobile' : '/chess')
   },
   {
     path: '/chess',
     name: 'ChessGame',
     component: () => import('@/views/template/index.vue'),
-    meta: { title: '皮卡鱼·AI象棋特大' }
+    meta: { title: '楚赢象棋 · 特级大师私教' }
+  },
+  {
+    path: '/mobile',
+    name: 'ChessMobile',
+    component: () => import('@/views/mobile/index.vue'),
+    meta: { title: '楚赢象棋 · 手机端' }
   },
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/chess'
+    redirect: () => (isMobileDevice() ? '/mobile' : '/chess')
   }
 ]
 
@@ -28,7 +39,7 @@ const router = createRouter({
 
 router.beforeEach((to, from, next) => {
   NProgress.start()
-  document.title = to.meta.title ? `${to.meta.title}` : '皮卡鱼·AI象棋特大'
+  document.title = to.meta.title ? `${to.meta.title}` : '楚赢象棋'
   next()
 })
 
