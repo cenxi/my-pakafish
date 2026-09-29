@@ -108,6 +108,8 @@ public class OpeningBookService {
                 int weight = bb.getShort() & 0xFFFF;
                 entries[i] = new BookEntry(lock, mv, weight);
             }
+            // 确保条目严格按 unsigned lock 升序排列，彻底避免 BOOK.DAT 格式差异导致的二分查找遗漏
+            Arrays.sort(entries, (a, b) -> Integer.compareUnsigned(a.lock, b.lock));
             log.info("成功加载中国象棋开局库 BOOK.DAT，共 {} 条着法", count);
         } catch (Exception e) {
             log.error("加载开局库 BOOK.DAT 失败", e);

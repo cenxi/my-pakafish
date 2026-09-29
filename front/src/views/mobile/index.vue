@@ -61,6 +61,13 @@
           :suggest-move-uci="isAnalysisMode ? engineResult?.bestMove : ''"
           @cell-click="onBoardCellClick"
         />
+        <transition name="el-zoom-in-bottom">
+          <div v-if="gameOverInfo" class="checkmate-banner">
+            <span class="banner-icon">⚔️</span>
+            <span class="banner-text">{{ gameOverInfo }}</span>
+            <el-button size="small" type="danger" round @click="handleNewGame">再来一局</el-button>
+          </div>
+        </transition>
       </div>
     </main>
 
@@ -298,7 +305,9 @@ import {
   parseFen,
   boardToFen,
   getLegalMoves,
-  uciToChinese
+  uciToChinese,
+  isCheckmate,
+  isKingInCheck
 } from '@/utils/chessEngine'
 
 const coordsToUci = (from, to) =>
@@ -381,6 +390,7 @@ const selectedPiecePos = ref(null)
 const legalMoves = ref([])
 const lastMoveHighlight = ref(null)
 const moveHistoryList = ref([])
+const gameOverInfo = ref('') // 绝杀局提示信息
 
 // 2. AI 算力与配置
 const engineSide = ref('b') // 默认 AI 执黑
@@ -624,6 +634,19 @@ async function executeUserMove(from, to) {
   currentTurn.value = currentTurn.value === 'r' ? 'b' : 'r'
   currentFen.value = boardToFen(boardState.value, currentTurn.value)
 
+  // 判定是否进入绝杀局 (胜负已分)
+  const isMated = isCheckmate(boardState.value, currentTurn.value)
+  if (isMated) {
+    const winnerName = currentTurn.value === 'r' ? '黑方' : '红方'
+    const loserName = currentTurn.value === 'r' ? '红方' : '黑方'
+    const tip = `绝杀！${winnerName}胜！${loserName}无路可走。`
+    gameOverInfo.value = tip
+    ElMessage.success({ message: tip, duration: 5000, showClose: true })
+    return
+  } else {
+    gameOverInfo.value = ''
+  }
+
   // 如果轮到 AI 走子，立即在指定时间内计算并落子
   if (currentTurn.value === engineSide.value) {
     executeEngineMove()
@@ -651,7 +674,13 @@ function startMobileSseAnalyze() {
 
   const fen = currentFen.value
   const targetDepth = searchDepth.value || 20
-  const url = `${getApiBaseUrl()}/api/chess/stream-analyze?fen=${encodeURIComponent(fen)}&depth=${targetDepth}&useBook=${useOpeningBook.value}`
+  let url = `${getApiBaseUrl()}/api/chess/stream-analyze?fen=${encodeURIComponent(fen)}&depth=${targetDepth}&useBook=${useOpeningBook.value}`
+  if (moveHistoryList.value && moveHistoryList.value.length > 0) {
+    const moveList = moveHistoryList.value.map(m => m.uci).filter(Boolean)
+    if (moveList.length > 0) {
+      url += `&moves=${encodeURIComponent(moveList.join(' '))}`
+    }
+  }
 
   isAnalyzing.value = true
   try {
@@ -696,6 +725,7 @@ async function executeEngineMove() {
   isAnalyzing.value = true
 
   const moveFen = currentFen.value
+  const moveList = (moveHistoryList.value || []).map(m => m.uci).filter(Boolean)
   try {
     const res = await axios.post(`${getApiBaseUrl()}/api/chess/analyze`, {
       fen: moveFen,
@@ -703,7 +733,8 @@ async function executeEngineMove() {
       movetime: searchMovetime.value || 1000,
       immediate: true,
       noCache: true,
-      useBook: useOpeningBook.value
+      useBook: useOpeningBook.value,
+      moves: moveList.length > 0 ? moveList : undefined
     })
 
     if (!res.data || !res.data.bestMove || currentFen.value !== moveFen) return
@@ -731,6 +762,18 @@ async function executeEngineMove() {
 
     currentTurn.value = currentTurn.value === 'r' ? 'b' : 'r'
     currentFen.value = boardToFen(boardState.value, currentTurn.value)
+
+    const isMated = isCheckmate(boardState.value, currentTurn.value)
+    if (isMated) {
+      const winnerName = currentTurn.value === 'r' ? '黑方' : '红方'
+      const loserName = currentTurn.value === 'r' ? '红方' : '黑方'
+      const tip = `绝杀！${winnerName}胜！${loserName}无路可走。`
+      gameOverInfo.value = tip
+      ElMessage.success({ message: tip, duration: 5000, showClose: true })
+      return
+    } else {
+      gameOverInfo.value = ''
+    }
 
     if (res.data.comment) {
       coachAdviceText.value = res.data.comment
@@ -770,6 +813,16 @@ function handleUndoMove() {
     currentTurn.value = currentTurn.value === 'r' ? 'b' : 'r'
   }
   currentFen.value = boardToFen(boardState.value, currentTurn.value)
+
+  const isMated = isCheckmate(boardState.value, currentTurn.value)
+  if (isMated && moveHistoryList.value.length > 0) {
+    const winnerName = currentTurn.value === 'r' ? '黑方' : '红方'
+    const loserName = currentTurn.value === 'r' ? '红方' : '黑方'
+    gameOverInfo.value = `绝杀！${winnerName}胜！${loserName}无路可走。`
+  } else {
+    gameOverInfo.value = ''
+  }
+
   lastMoveHighlight.value = null
   selectedPiecePos.value = null
   legalMoves.value = []
@@ -780,6 +833,7 @@ function handleUndoMove() {
 function handleNewGame() {
   if (isEngineMoving) return
   stopMobileSseAnalyze()
+  gameOverInfo.value = ''
   currentFen.value = INITIAL_FEN
   moveHistoryList.value = []
   lastMoveHighlight.value = null
@@ -1371,11 +1425,40 @@ async function handleMobileSend() {
     display: flex;
     justify-content: center;
     align-items: center;
+    position: relative;
 
     :deep(.chess-board-wrapper) {
       width: 100%;
       max-width: 100%;
       aspect-ratio: 9 / 10;
+    }
+
+    .checkmate-banner {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      right: 10px;
+      z-index: 50;
+      background: linear-gradient(135deg, #ffefe6 0%, #ffe0d1 100%);
+      border: 1px solid #f9905c;
+      border-radius: 8px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-sizing: border-box;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+
+      .banner-icon {
+        font-size: 18px;
+        margin-right: 6px;
+      }
+      .banner-text {
+        font-weight: bold;
+        color: #cf3d00;
+        font-size: 13px;
+        flex: 1;
+      }
     }
   }
 }

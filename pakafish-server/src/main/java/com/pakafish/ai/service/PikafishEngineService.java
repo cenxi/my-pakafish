@@ -282,9 +282,18 @@ public class PikafishEngineService {
 
     public synchronized void restartEngineProcess() {
         try {
+            if (engineWriter != null) {
+                try { engineWriter.close(); } catch (Exception ignored) {}
+                engineWriter = null;
+            }
+            if (engineReader != null) {
+                try { engineReader.close(); } catch (Exception ignored) {}
+                engineReader = null;
+            }
             if (engineProcess != null) {
                 engineProcess.destroyForcibly();
                 engineProcess.waitFor(1, TimeUnit.SECONDS);
+                engineProcess = null;
             }
         } catch (Exception ignored) {
         }
@@ -353,15 +362,19 @@ public class PikafishEngineService {
     private static final Pattern SELDEPTH_PATTERN = Pattern.compile("\\bseldepth\\s+(\\d+)");
 
     public EngineAnalysisResult analyzePosition(String fen, Integer movetimeLimit) {
-        return analyzePosition(fen, null, movetimeLimit);
+        return analyzePosition(fen, null, movetimeLimit, null, null);
+    }
+
+    public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit) {
+        return analyzePosition(fen, depthLimit, movetimeLimit, null, null);
     }
 
     /**
-     * 同步分析（单次出招计算，带严格超时防护与管道排空）
+     * 同步分析（单次出招计算，带严格超时防护与管道排空，支持对局着法历史注入以准确判定重复/长将/长捉）
      */
-    public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit) {
+    public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit, List<String> moves, String startFen) {
         long sessionId = generateSessionId();
-        log.info("【皮卡鱼单次分析】准备启动会话 #{}, FEN: {}", sessionId, fen);
+        log.info("【皮卡鱼单次分析】准备启动会话 #{}, FEN: {}, 历史步数: {}", sessionId, fen, moves != null ? moves.size() : 0);
 
         // 抢占式：如果正在进行后台推演，先通知当前推演尽快停下
         stopCurrentSearch();
@@ -393,7 +406,16 @@ public class PikafishEngineService {
                 isSearching = true;
             }
 
-            sendCommand("position fen " + fen);
+            // 构建 position 指令
+            if (moves != null && !moves.isEmpty()) {
+                if (startFen != null && !startFen.isBlank() && !startFen.startsWith("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR")) {
+                    sendCommand("position fen " + startFen + " moves " + String.join(" ", moves));
+                } else {
+                    sendCommand("position startpos moves " + String.join(" ", moves));
+                }
+            } else {
+                sendCommand("position fen " + fen);
+            }
 
             // 安全深度与思考时间约束
             int safeDepth = (depthLimit != null && depthLimit > 0) ? Math.min(depthLimit, 30) : defaultDepth;
@@ -433,15 +455,19 @@ public class PikafishEngineService {
     }
 
     public EngineAnalysisResult streamAnalyze(String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
-        return streamAnalyze(generateSessionId(), fen, maxDepth, onProgress);
+        return streamAnalyze(generateSessionId(), fen, maxDepth, onProgress, null, null);
+    }
+
+    public EngineAnalysisResult streamAnalyze(long sessionId, String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
+        return streamAnalyze(sessionId, fen, maxDepth, onProgress, null, null);
     }
 
     /**
      * 流式分析（SSE 模式）：发送 go depth <safeDepth>，每推深一层通过 callback 推送中间结果，
      * 具备抢占式中断与排空能力，新请求进入时自动打断旧推演释放锁。
      */
-    public EngineAnalysisResult streamAnalyze(long sessionId, String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress) {
-        log.info("【皮卡鱼流式推演】准备启动会话 #{}, FEN: {}", sessionId, fen);
+    public EngineAnalysisResult streamAnalyze(long sessionId, String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress, List<String> moves, String startFen) {
+        log.info("【皮卡鱼流式推演】准备启动会话 #{}, FEN: {}, 历史步数: {}", sessionId, fen, moves != null ? moves.size() : 0);
 
         // 抢占式：如果正在运行前一个推演，立刻 stop 中断它
         stopCurrentSearch();
@@ -471,7 +497,15 @@ public class PikafishEngineService {
 
             // 限制流式推演最大深度在 15~35 层区间，杜绝 128 层天文运算
             int safeDepth = Math.min(Math.max(maxDepth, 15), 35);
-            sendCommand("position fen " + fen);
+            if (moves != null && !moves.isEmpty()) {
+                if (startFen != null && !startFen.isBlank() && !startFen.startsWith("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR")) {
+                    sendCommand("position fen " + startFen + " moves " + String.join(" ", moves));
+                } else {
+                    sendCommand("position startpos moves " + String.join(" ", moves));
+                }
+            } else {
+                sendCommand("position fen " + fen);
+            }
             log.info("【皮卡鱼指令】【会话 #{}】流式推演启动: depth {}", sessionId, safeDepth);
             sendCommand("go depth " + safeDepth);
 

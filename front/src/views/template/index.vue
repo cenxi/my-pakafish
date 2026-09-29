@@ -993,7 +993,13 @@ function startPcSseAnalyze() {
 
   const fen = currentFen.value
   const targetDepth = searchDepth.value || 20
-  const url = `${getApiBaseUrl()}/api/chess/stream-analyze?fen=${encodeURIComponent(fen)}&depth=${targetDepth}&useBook=${useOpeningBook.value}`
+  let url = `${getApiBaseUrl()}/api/chess/stream-analyze?fen=${encodeURIComponent(fen)}&depth=${targetDepth}&useBook=${useOpeningBook.value}`
+  if (historyMoves.value && historyMoves.value.length > 0) {
+    const moveList = historyMoves.value.slice(0, currentMoveIndex.value).map(m => m.uci).filter(Boolean)
+    if (moveList.length > 0) {
+      url += `&moves=${encodeURIComponent(moveList.join(' '))}`
+    }
+  }
 
   isAnalyzing.value = true
   try {
@@ -1036,6 +1042,7 @@ async function triggerEngineBestMove() {
 
   isAnalyzing.value = true
   const moveFen = currentFen.value
+  const moveList = (historyMoves.value || []).slice(0, currentMoveIndex.value).map(m => m.uci).filter(Boolean)
   try {
     const resp = await axios.post(`${getApiBaseUrl()}/api/chess/analyze`, {
       fen: moveFen,
@@ -1043,7 +1050,8 @@ async function triggerEngineBestMove() {
       movetime: searchMovetime.value || 1000,
       immediate: true,
       noCache: true,
-      useBook: useOpeningBook.value
+      useBook: useOpeningBook.value,
+      moves: moveList.length > 0 ? moveList : undefined
     })
     engineResult.value = resp.data
 

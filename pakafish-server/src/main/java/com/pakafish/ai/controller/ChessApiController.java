@@ -13,6 +13,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -52,8 +53,11 @@ public class ChessApiController {
         Boolean forceEngine = (request.containsKey("forceEngine") && Boolean.TRUE.equals(request.get("forceEngine"))) || !useBook;
 
         Boolean immediate = request.containsKey("immediate") && Boolean.TRUE.equals(request.get("immediate"));
+        @SuppressWarnings("unchecked")
+        List<String> moves = request.containsKey("moves") ? (List<String>) request.get("moves") : null;
+        String startFen = request.containsKey("startFen") ? (String) request.get("startFen") : null;
 
-        log.info("【走棋/分析请求】FEN: {}, depth: {}, movetime: {}, useBook: {}, forceEngine: {}, immediate: {}", fen, depth, movetime, useBook, forceEngine, immediate);
+        log.info("【走棋/分析请求】FEN: {}, depth: {}, movetime: {}, useBook: {}, forceEngine: {}, immediate: {}, 历史步数: {}", fen, depth, movetime, useBook, forceEngine, immediate, moves != null ? moves.size() : 0);
 
         // 1. 如果启用了开局库且未强制指定纯引擎，先查开局库
         if (!forceEngine) {
@@ -99,7 +103,7 @@ public class ChessApiController {
         log.info("【皮卡鱼深度推演】开局库脱谱且无高深度缓存，启动引擎计算...");
         // 3. 脱谱或强制引擎：调用皮卡鱼引擎
         long startTime = System.currentTimeMillis();
-        EngineAnalysisResult result = pikafishEngineService.analyzePosition(fen, depth, movetime);
+        EngineAnalysisResult result = pikafishEngineService.analyzePosition(fen, depth, movetime, moves, startFen);
         long elapsed = System.currentTimeMillis() - startTime;
         log.info("【皮卡鱼推演完成】耗时: {} ms, 最佳着法: {}, 深度: {}", elapsed, result != null ? result.getBestMove() : "null", result != null ? result.getDepth() : 0);
         if (result != null) {
@@ -162,7 +166,9 @@ public class ChessApiController {
     public SseEmitter streamAnalyze(
             @RequestParam(value = "fen") String fen,
             @RequestParam(value = "depth", required = false, defaultValue = "30") Integer depth,
-            @RequestParam(value = "useBook", required = false, defaultValue = "true") Boolean useBook) {
+            @RequestParam(value = "useBook", required = false, defaultValue = "true") Boolean useBook,
+            @RequestParam(value = "moves", required = false) String movesStr,
+            @RequestParam(value = "startFen", required = false) String startFen) {
 
         SseEmitter emitter = new SseEmitter(300_000L); // 5分钟
         final long sessionId = pikafishEngineService.generateSessionId();
@@ -171,6 +177,12 @@ public class ChessApiController {
         emitter.onCompletion(() -> pikafishEngineService.cancelSearch(sessionId));
         emitter.onTimeout(() -> pikafishEngineService.cancelSearch(sessionId));
         emitter.onError(e -> pikafishEngineService.cancelSearch(sessionId));
+
+        List<String> moves = null;
+        if (movesStr != null && !movesStr.isBlank()) {
+            moves = Arrays.asList(movesStr.trim().split("\\s+"));
+        }
+        final List<String> finalMoves = moves;
 
         Thread.startVirtualThread(() -> {
             try {
@@ -217,7 +229,7 @@ public class ChessApiController {
                     } catch (Exception ignored) {}
                 }
 
-                // 3. 启动皮卡鱼流式深算（利用引擎底层 TT Hash 记忆继续向下深算）
+                // 3. 启动皮卡鱼流式深算（利用引擎底层 TT Hash 记忆继续向下深算，并注入历史轨迹以遵循长将判负等亚洲棋规）
                 pikafishEngineService.streamAnalyze(sessionId, fen, depth, snapshot -> {
                     try {
                         if (snapshot.getBestMove() != null && snapshot.getBestMoveChinese() == null) {
@@ -236,7 +248,7 @@ public class ChessApiController {
                         pikafishEngineService.cancelSearch(sessionId);
                         throw new RuntimeException("SSE_CLIENT_DISCONNECTED", e);
                     }
-                });
+                }, finalMoves, startFen);
 
                 try {
                     emitter.complete();
