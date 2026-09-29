@@ -53,6 +53,12 @@
             <artifactId>langchain4j-open-ai</artifactId>
         </dependency>
 
+        <!-- Caffeine 高性能本地缓存（替换 synchronizedMap LRU） -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
         <!-- Spring Boot Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

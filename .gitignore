@@ -38,6 +38,7 @@ deploy
 deploy.zip
 dist.tar.gz
 front/dist.zip
+*dist.zip
 ### VS Code ###
 .vscode/
 

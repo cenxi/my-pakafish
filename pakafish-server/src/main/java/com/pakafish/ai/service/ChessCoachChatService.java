@@ -118,7 +118,7 @@ public class ChessCoachChatService {
 
         sb.append("\n【当前最新棋盘状态】\n");
         sb.append("- 轮到走子方: ").append(isRed ? "红方" : "黑方").append("\n");
-        sb.append("- FEN 坐标状态: ").append(fen).append("\n");
+        // FEN 坐标串对 LLM 无语义价值，已省略（引擎分析结果已完整描述局面）
 
         if (res != null) {
             sb.append("\n【皮卡鱼引擎客观计算事实】\n");
@@ -177,9 +177,14 @@ public class ChessCoachChatService {
         });
 
         try {
-            return future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            // 【Fix-O3】此接口在 LLM 生成期间占用 Servlet 线程（最多 60s）。
+            // 高并发场景建议改用 GET /chat/stream（SSE + 虚拟线程），不阻塞 Tomcat 线程池。
+            return future.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.warn("获取特大回复超时（60s），局面过于复杂或网络延迟");
+            return "特级大师沉思时间过长，建议先走稳当前步调，稍后再听取教练点评。";
         } catch (Exception e) {
-            log.error("获取特大回复超时或异常", e);
+            log.error("获取特大回复异常", e);
             return "特级大师正在沉思局势，建议先巩固子力，走稳当前步调。";
         }
     }

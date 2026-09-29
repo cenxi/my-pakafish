@@ -27,7 +27,10 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -48,12 +51,35 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
     private final PikafishEngineService pikafishEngineService;
     private final ChessCoordinateConverter coordinateConverter;
     private final EdgeTtsService edgeTtsService;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * 【Fix-O4】注入 Spring 管理的 ObjectMapper Bean，统一配置，避免各处 new ObjectMapper()
+     */
+    private final ObjectMapper objectMapper;
 
     // 记录每个前端会话的状态信息
     private final Map<String, SessionContext> contextMap = new ConcurrentHashMap<>();
-    // 线程池防止野蛮 new Thread 导致 JVM 资源耗尽
-    private final java.util.concurrent.ExecutorService aiExecutor = java.util.concurrent.Executors.newFixedThreadPool(4);
+
+    /**
+     * 【Fix-B4 优化】将固定 4 线程池改为虚拟线程执行器（JDK 21+）：
+     * - 虚拟线程在 TTS 等 I/O 阻塞时挂起但不占用平台线程，并发能力大幅提升。
+     * - TTS 合成使用独立的 IO 线程池，与 LLM 回调线程分离，避免互相阻塞。
+     */
+    private final java.util.concurrent.ExecutorService aiExecutor =
+            Executors.newVirtualThreadPerTaskExecutor();
+
+    /**
+     * 【Fix-B5 / O5 TTS 有序队列】每个 session 对应一个 TTS 合成任务队列，
+     * 确保音频片段严格按顺序提交给前端，即使多个片段并行合成完成也能顺序推送。
+     * key: sessionId, value: TTS 序列化推送任务队列
+     */
+    private final Map<String, BlockingQueue<Runnable>> ttsQueues = new ConcurrentHashMap<>();
+
+    /**
+     * 【Fix-B4】每个 session 独立的 WS 发送锁对象，消除全局 synchronized 瓶颈。
+     * 锁粒度从"整个 Handler 实例"缩小到"单个 session"。
+     */
+    private final Map<String, Object> sessionLocks = new ConcurrentHashMap<>();
 
     private static class SessionContext {
         String currentFen = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1";
@@ -70,9 +96,9 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
         1. 回答要【口语化、亲切、自然、生动】，像在电话里跟徒弟聊天一样；
         2. 句子要【精炼短促】（每次回答 50~100 字以内为最佳），避免长篇大论，方便听觉接收；
         3. 严禁输出任何 Markdown 格式符号（严禁使用 **加粗**、# 标题、列表序号、表格、LaTeX 箭头等）；
-        4. 招法直接念中文（如“进车压马”、“当头炮”、“马八进七”）；
+        4. 招法直接念中文（如"进车压马"、"当头炮"、"马八进七"）；
         5. 多启发学员思考，给出行棋心理和大局观建议；
-        6. 【语音识别容错】：学员问题来自麦克风语音实时转写，可能会有同音错别字（如把“当头炮”听成“当头泡/跑”、“车”误读成“彻/撤”、“士角炮”成“视角泡”等），请结合盘面主动纠正理解其实际下棋意图。
+        6. 【语音识别容错】：学员问题来自麦克风语音实时转写，可能会有同音错别字（如把"当头炮"听成"当头泡/跑"、"车"误读成"彻/撤"、"士角炮"成"视角泡"等），请结合盘面主动纠正理解其实际下棋意图。
         """;
 
     @Override
@@ -80,6 +106,16 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
         String sessionId = session.getId();
         SessionContext ctx = new SessionContext();
         contextMap.put(sessionId, ctx);
+        // 【Fix-B4】为每个 session 创建独立的发送锁
+        sessionLocks.put(sessionId, new Object());
+        // 【Fix-O5】为每个 session 创建 TTS 有序队列，并启动队列消费线程
+        LinkedBlockingQueue<Runnable> ttsQueue = new LinkedBlockingQueue<>();
+        ttsQueues.put(sessionId, ttsQueue);
+        startTtsQueueConsumer(sessionId, ttsQueue);
+
+        // 注册 FunASR 断连错误通知回调（多次重连失败后通知前端）
+        funAsrClientService.registerErrorNotifier(sessionId, errorMsg ->
+                sendWsJson(session, Map.of("type", "funasr_error", "message", errorMsg)));
 
         // 启动 FunASR 会话
         funAsrClientService.startSession(
@@ -183,7 +219,7 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
                     对局走步记录：%s
                     皮卡鱼引擎客观计算：建议着法【%s】，当前优势分【%d厘分】
                     
-                    学员在电话里问你：“%s”
+                    学员在电话里问你："%s"
                     请用大师身份电话口语化直接回答他，精简明晰。
                     """, ctx.currentFen, ctx.historyMoves, bestMoveZh,
                         engineResult != null ? engineResult.getScoreCp() : 0, userText);
@@ -219,7 +255,8 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
                             sentenceBuf.setLength(0);
                             if (!toSpeak.isBlank()) {
                                 int seq = seqCounter.incrementAndGet();
-                                synthesizeAndSend(session, ctx, toSpeak, seq);
+                                // 【Fix-O5】异步提交到 TTS 有序队列，不阻塞 LLM token 流
+                                enqueueTtsSynthesis(session, ctx, toSpeak, seq);
                             }
                         }
                     }
@@ -231,7 +268,7 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
                             sentenceBuf.setLength(0);
                             if (!remaining.isBlank()) {
                                 int seq = seqCounter.incrementAndGet();
-                                synthesizeAndSend(session, ctx, remaining, seq);
+                                enqueueTtsSynthesis(session, ctx, remaining, seq);
                             }
                         }
                         ctx.isAiSpeaking.set(false);
@@ -252,6 +289,34 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
             } catch (Exception e) {
                 log.error("处理电话提问异常", e);
                 ctx.isAiSpeaking.set(false);
+            }
+        });
+    }
+
+    /**
+     * 【Fix-O5】将 TTS 合成任务提交到有序队列，由 session 独立的消费线程按序执行。
+     * 这样 LLM onNext 回调不会被 TTS I/O 阻塞，同时保证音频片段有序到达前端。
+     */
+    private void enqueueTtsSynthesis(WebSocketSession session, SessionContext ctx, String text, int seq) {
+        BlockingQueue<Runnable> queue = ttsQueues.get(session.getId());
+        if (queue == null) return;
+        queue.offer(() -> synthesizeAndSend(session, ctx, text, seq));
+    }
+
+    /**
+     * 【Fix-O5】每个 session 独立的 TTS 队列消费线程（虚拟线程），
+     * 串行执行 TTS 合成，保证音频包顺序，避免乱序播放。
+     */
+    private void startTtsQueueConsumer(String sessionId, BlockingQueue<Runnable> queue) {
+        Thread.ofVirtual().name("tts-consumer-" + sessionId).start(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    Runnable task = queue.poll(30, java.util.concurrent.TimeUnit.SECONDS);
+                    if (task == null) continue; // 超时继续等（session 可能关闭后队列为空）
+                    task.run();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         });
     }
@@ -278,11 +343,25 @@ public class AiCallWebSocketHandler extends AbstractWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String sessionId = session.getId();
         contextMap.remove(sessionId);
+        sessionLocks.remove(sessionId);
+        // 清理 TTS 队列（消费线程会因 InterruptedException 或超时退出）
+        BlockingQueue<Runnable> ttsQueue = ttsQueues.remove(sessionId);
+        if (ttsQueue != null) {
+            ttsQueue.clear();
+        }
         funAsrClientService.closeSession(sessionId);
     }
 
-    private synchronized void sendWsJson(WebSocketSession session, Map<String, Object> data) {
-        if (session != null && session.isOpen()) {
+    /**
+     * 【Fix-B4】sendWsJson 改为 session 级别锁，消除全局 synchronized 瓶颈。
+     * 不同 session 的消息发送完全并行，同一 session 内串行（WebSocket 协议要求）。
+     */
+    private void sendWsJson(WebSocketSession session, Map<String, Object> data) {
+        if (session == null || !session.isOpen()) return;
+        // 获取该 session 专属的锁对象
+        Object lock = sessionLocks.computeIfAbsent(session.getId(), k -> new Object());
+        synchronized (lock) {
+            if (!session.isOpen()) return;
             try {
                 session.sendMessage(new TextMessage(objectMapper.writeValueAsString(data)));
             } catch (IOException e) {

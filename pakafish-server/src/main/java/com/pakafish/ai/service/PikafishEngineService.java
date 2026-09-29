@@ -1,5 +1,7 @@
 package com.pakafish.ai.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.pakafish.ai.model.EngineAnalysisResult;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -11,7 +13,11 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,38 +46,52 @@ public class PikafishEngineService {
 
     private Process engineProcess;
     private BufferedWriter engineWriter;
-    private BufferedReader engineReader;
 
-    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+    /**
+     * 【Fix-B2】引擎输出异步读取队列：独立读线程将引擎每行输出放入队列，
+     * 分析方法通过 poll(timeout) 消费，彻底避免 readLine() 阻塞导致超时检测失效。
+     */
+    private final BlockingQueue<String> engineOutputQueue = new LinkedBlockingQueue<>(4096);
+    private Thread engineReaderThread;
+
+    /**
+     * 【Fix-B1】统一使用 ReentrantLock，废弃所有 synchronized 修饰符，
+     * 彻底消除 synchronized + ReentrantLock 混用导致的死锁风险。
+     */
+    private final ReentrantLock lock = new ReentrantLock();
+
     private volatile boolean isSearching = false;
-    private final java.util.concurrent.atomic.AtomicLong sessionSequence = new java.util.concurrent.atomic.AtomicLong(0);
-    private volatile Long activeSessionId = null;
+    private final AtomicLong sessionSequence = new AtomicLong(0);
+
+    /**
+     * 【Fix-B3】activeSessionId 改为 volatile long（原始类型），
+     * 用 -1L 表示无活动会话，彻底避免 Long 装箱 == 比较超过 127 后失效的 Bug。
+     */
+    private volatile long activeSessionId = -1L;
 
     public long generateSessionId() {
         return sessionSequence.incrementAndGet();
     }
 
-    private final java.util.concurrent.ScheduledExecutorService watchdogExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "pikafish-watchdog");
-        t.setDaemon(true);
-        return t;
-    });
+    private final java.util.concurrent.ScheduledExecutorService watchdogExecutor =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "pikafish-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
 
     @org.springframework.beans.factory.annotation.Autowired
     private ChessCoordinateConverter coordinateConverter;
 
     /**
-     * L1 内存高速缓存：记录已分析过的局面以及由 PV 变例预热推导出的后续子局面。
+     * 【Fix-O1】L1 内存高速缓存：改用 Caffeine 替代 synchronizedMap(LinkedHashMap)。
+     * Caffeine 提供并发安全、更低锁竞争的 LRU 实现，且 get/put 是原子操作，
+     * 消除原来先 get 再 put 的 TOCTOU 竞态条件。
      * LRU 淘汰策略，最大保留 2000 个局面。
      */
-    private final java.util.Map<String, EngineAnalysisResult> analysisCache = java.util.Collections.synchronizedMap(
-        new java.util.LinkedHashMap<String, EngineAnalysisResult>(256, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(java.util.Map.Entry<String, EngineAnalysisResult> eldest) {
-                return size() > 2000;
-            }
-        }
-    );
+    private final Cache<String, EngineAnalysisResult> analysisCache = Caffeine.newBuilder()
+            .maximumSize(2000)
+            .build();
 
     /**
      * 规范化 FEN 串：去除半步计数与总回合数，保留局面布局与走子方，最大化同型局面缓存命中
@@ -91,7 +111,7 @@ public class PikafishEngineService {
     public EngineAnalysisResult getCachedAnalysis(String fen) {
         if (fen == null) return null;
         String key = normalizeFen(fen);
-        EngineAnalysisResult cached = analysisCache.get(key);
+        EngineAnalysisResult cached = analysisCache.getIfPresent(key);
         if (cached != null) {
             return copyResult(cached);
         }
@@ -110,8 +130,15 @@ public class PikafishEngineService {
     /**
      * 基于 PV 变例树向下预热推导 1~2 步子局面：
      * P0 (红) 算出 PV = [m1, m2, m3, m4]
-     * -> P1 = applyMove(P0, m1) (黑方走子，其最佳应手为 m2，红方 ponder 为 m3，PV 为 [m2, m3, m4]，深度为 D-1，绝对评分一致)
+     * -> P1 = applyMove(P0, m1) (黑方走子，其最佳应手为 m2，PV 为 [m2, m3, m4]，深度为 D-1)
      * -> P2 = applyMove(P1, m2) (红方走子，最佳应手为 m3，PV 为 [m3, m4]，深度为 D-2)
+     *
+     * 【Fix-B5】修正预热子局面的评分方向：
+     * P0 的 scoreCp 是红方绝对分（已经过 applyAbsoluteScore 翻转）。
+     * P1 是对方视角，其绝对分 = -P0.scoreCp（对方优势取反）。
+     * P2 回到同方视角，其绝对分 = P0.scoreCp（与 P0 一致）。
+     * 同理 winRate = 100 - P0.winRate（对方）。
+     * 不能把 P0 的绝对分直接赋给 P1，否则下次取出时 applyAbsoluteScore 会再翻转一次，变成错误值。
      */
     private void deriveAndCacheChildPositions(String fen, EngineAnalysisResult result) {
         if (coordinateConverter == null || result == null || result.getPvMoves() == null || result.getPvMoves().size() < 2) {
@@ -120,6 +147,11 @@ public class PikafishEngineService {
         List<String> pv = result.getPvMoves();
         int currentDepth = result.getDepth() != null ? result.getDepth() : 10;
         if (currentDepth <= 2) return;
+        // 只预热有实际引擎算力的高深度结果，避免缓存覆盖更优结果
+        if (currentDepth < 10) return;
+
+        // P0 的红方绝对分
+        int p0RedScore = result.getScoreCp() != null ? result.getScoreCp() : 0;
 
         try {
             // 推导 P1: 对方回合 (下出 m1 后的局面)
@@ -129,17 +161,24 @@ public class PikafishEngineService {
             List<String> pv1 = new java.util.ArrayList<>(pv.subList(1, pv.size()));
             String m3 = pv.size() > 2 ? pv.get(2) : null;
 
+            // 【Fix-B5】P1 是对方（黑方）视角：红方绝对分取反
+            int p1RedScore = -p0RedScore;
+            double p1WinRate = result.getWinRate() != null ? (100.0 - result.getWinRate()) : 50.0;
+            String p1AdvantageDesc = formatAdvantageText(Math.abs(p1RedScore), p1RedScore >= 0 ? "红方" : "黑方");
+            String p1SideText = p1RedScore == 0 ? "均势 (0分)"
+                    : (p1RedScore > 0 ? "红优 +" + p1RedScore + "分" : "黑优 +" + Math.abs(p1RedScore) + "分");
+
             EngineAnalysisResult r1 = EngineAnalysisResult.builder()
                     .bestMove(m2)
                     .bestMoveChinese(coordinateConverter.uciToChinese(fen1, m2))
                     .ponderMove(m3)
-                    .scoreCp(result.getScoreCp())
-                    .winRate(result.getWinRate())
+                    .scoreCp(p1RedScore)
+                    .winRate(p1WinRate)
                     .depth(Math.max(1, currentDepth - 1))
                     .pvMoves(pv1)
                     .pvMovesChinese(coordinateConverter.convertMoveList(fen1, pv1))
-                    .advantageDescription(result.getAdvantageDescription())
-                    .sideAdvantageText(result.getSideAdvantageText())
+                    .advantageDescription(p1AdvantageDesc)
+                    .sideAdvantageText(p1SideText)
                     .fromBook(false)
                     .fromCache(true)
                     .build();
@@ -156,17 +195,22 @@ public class PikafishEngineService {
                 List<String> pv2 = new java.util.ArrayList<>(pv.subList(2, pv.size()));
                 String m4 = pv.size() > 3 ? pv.get(3) : null;
 
+                // 【Fix-B5】P2 回到同方（红方）视角，红方绝对分与 P0 一致
+                String p2AdvantageDesc = formatAdvantageText(Math.abs(p0RedScore), p0RedScore >= 0 ? "红方" : "黑方");
+                String p2SideText = p0RedScore == 0 ? "均势 (0分)"
+                        : (p0RedScore > 0 ? "红优 +" + p0RedScore + "分" : "黑优 +" + Math.abs(p0RedScore) + "分");
+
                 EngineAnalysisResult r2 = EngineAnalysisResult.builder()
                         .bestMove(m3)
                         .bestMoveChinese(coordinateConverter.uciToChinese(fen2, m3))
                         .ponderMove(m4)
-                        .scoreCp(result.getScoreCp())
+                        .scoreCp(p0RedScore)
                         .winRate(result.getWinRate())
                         .depth(Math.max(1, currentDepth - 2))
                         .pvMoves(pv2)
                         .pvMovesChinese(coordinateConverter.convertMoveList(fen2, pv2))
-                        .advantageDescription(result.getAdvantageDescription())
-                        .sideAdvantageText(result.getSideAdvantageText())
+                        .advantageDescription(p2AdvantageDesc)
+                        .sideAdvantageText(p2SideText)
                         .fromBook(false)
                         .fromCache(true)
                         .build();
@@ -185,12 +229,14 @@ public class PikafishEngineService {
     private void cacheResult(String fen, EngineAnalysisResult result) {
         if (fen == null || result == null || result.getBestMove() == null) return;
         String key = normalizeFen(fen);
-        EngineAnalysisResult existing = analysisCache.get(key);
-        if (existing != null && existing.getDepth() != null && result.getDepth() != null
-                && existing.getDepth() > result.getDepth()) {
-            return;
-        }
-        analysisCache.put(key, copyResult(result));
+        // 【Fix-O1】Caffeine 的 get-if-absent 模式：原子性地只在深度更高时才更新
+        analysisCache.asMap().merge(key, copyResult(result), (existing, incoming) -> {
+            if (existing.getDepth() != null && incoming.getDepth() != null
+                    && existing.getDepth() >= incoming.getDepth()) {
+                return existing; // 保留深度更高的结果
+            }
+            return incoming;
+        });
     }
 
     private EngineAnalysisResult copyResult(EngineAnalysisResult src) {
@@ -215,62 +261,86 @@ public class PikafishEngineService {
 
     /**
      * 强行中断当前正在运行的推演（仅当处于推演中时发送 stop）
+     * 【Fix-B1】去掉 synchronized，改用 ReentrantLock 保护
      */
-    public synchronized void stopCurrentSearch() {
-        if (isSearching) {
-            try {
-                sendCommand("stop");
-                log.info("【皮卡鱼指令】发送 stop 中断当前活动计算 (会话 #{})", activeSessionId);
-            } catch (Exception e) {
-                log.warn("发送 stop 异常", e);
+    public void stopCurrentSearch() {
+        lock.lock();
+        try {
+            if (isSearching) {
+                try {
+                    sendCommandUnsafe("stop");
+                    log.info("【皮卡鱼指令】发送 stop 中断当前活动计算 (会话 #{})", activeSessionId);
+                } catch (Exception e) {
+                    log.warn("发送 stop 异常", e);
+                }
             }
+        } finally {
+            lock.unlock();
         }
     }
 
     /**
-     * 带会话 ID 的精准取消：仅当活动会话匹配指定 session 时才执行 stop，彻底杜绝异步回调误杀新请求
+     * 带会话 ID 的精准取消：仅当活动会话匹配指定 session 时才执行 stop
+     * 【Fix-B1 + Fix-B3】去掉 synchronized，使用 long 原始类型比较
      */
-    public synchronized void cancelSearch(long sessionId) {
-        if (activeSessionId != null && activeSessionId == sessionId && isSearching) {
-            log.info("【皮卡鱼取消会话】当前会话 #{} 被取消，发送 stop", sessionId);
-            try {
-                sendCommand("stop");
-            } catch (Exception e) {
-                log.warn("取消会话发送 stop 异常", e);
+    public void cancelSearch(long sessionId) {
+        lock.lock();
+        try {
+            // 【Fix-B3】activeSessionId 现为 long 原始类型，直接 == 比较安全
+            if (activeSessionId == sessionId && isSearching) {
+                log.info("【皮卡鱼取消会话】当前会话 #{} 被取消，发送 stop", sessionId);
+                try {
+                    sendCommandUnsafe("stop");
+                } catch (Exception e) {
+                    log.warn("取消会话发送 stop 异常", e);
+                }
+            } else {
+                log.debug("【皮卡鱼忽略过期中断】会话 #{} 已结束或不匹配当前活动会话 #{}", sessionId, activeSessionId);
             }
-        } else {
-            log.debug("【皮卡鱼忽略过期中断】会话 #{} 已结束或不匹配当前活动会话 #{}", sessionId, activeSessionId);
+        } finally {
+            lock.unlock();
         }
     }
 
     /**
      * 确保引擎停止当前任何搜索，并清空管道直到引擎确认就绪 (isready -> readyok)
-     * 调用此方法必须持有 lock
+     * 调用此方法必须已持有 lock
+     *
+     * 【Fix-B2】改用 engineOutputQueue.poll(timeout) 替代阻塞 readLine()，
+     * 超时检测真实有效；引擎读取线程独立运行，不会因阻塞卡死整个业务线程。
      */
-    public synchronized void ensureEngineReady() {
+    private void ensureEngineReady() {
         try {
             ensureEngine();
             if (isSearching) {
-                sendCommand("stop");
+                sendCommandUnsafe("stop");
             }
-            sendCommand("isready");
+            // 排空队列中的遗留输出
+            engineOutputQueue.clear();
+            sendCommandUnsafe("isready");
 
             long startTime = System.currentTimeMillis();
-            String line;
-            while ((line = engineReader.readLine()) != null) {
+            while (true) {
+                // 【Fix-B2】poll 带超时，不会永远阻塞
+                String line = engineOutputQueue.poll(200, TimeUnit.MILLISECONDS);
+                if (line == null) {
+                    // 无数据，检查超时
+                    if (System.currentTimeMillis() - startTime > 2500) {
+                        log.warn("【皮卡鱼异常】等待 readyok 超时 (>2.5s)，强杀并重启引擎进程");
+                        restartEngineProcess();
+                        return;
+                    }
+                    continue;
+                }
                 line = line.trim();
                 if ("readyok".equals(line)) {
                     log.debug("【皮卡鱼就绪】引擎已同步排空并返回 readyok");
                     return;
                 }
-                // 超时保护：如果 2.5 秒内未等到 readyok，说明引擎进程可能已异常卡死，直接强杀重启
-                if (System.currentTimeMillis() - startTime > 2500) {
-                    log.warn("【皮卡鱼异常】等待 readyok 超时 (>2.5s)，强杀并重启引擎进程");
-                    restartEngineProcess();
-                    return;
-                }
             }
-            log.warn("【皮卡鱼异常】读取到 EOF，重启引擎进程");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("【皮卡鱼异常】等待 readyok 被中断");
             restartEngineProcess();
         } catch (Exception e) {
             log.error("【皮卡鱼异常】同步 readyok 发生异常，重启引擎", e);
@@ -280,15 +350,13 @@ public class PikafishEngineService {
         }
     }
 
-    public synchronized void restartEngineProcess() {
+    public void restartEngineProcess() {
+        // 【Fix-B1】不加 synchronized，调用方已持有 lock
+        stopEngineReaderThread();
         try {
             if (engineWriter != null) {
                 try { engineWriter.close(); } catch (Exception ignored) {}
                 engineWriter = null;
-            }
-            if (engineReader != null) {
-                try { engineReader.close(); } catch (Exception ignored) {}
-                engineReader = null;
             }
             if (engineProcess != null) {
                 engineProcess.destroyForcibly();
@@ -297,6 +365,7 @@ public class PikafishEngineService {
             }
         } catch (Exception ignored) {
         }
+        engineOutputQueue.clear();
         try {
             startEngine();
         } catch (Exception e) {
@@ -313,7 +382,12 @@ public class PikafishEngineService {
         }
     }
 
-    private synchronized void startEngine() throws IOException {
+    /**
+     * 【Fix-B2】启动引擎后，同时启动独立的异步读取线程，
+     * 将引擎所有输出行放入 engineOutputQueue，业务线程通过 poll 消费。
+     */
+    private void startEngine() throws IOException {
+        // 【Fix-B1】调用方（init 或 restartEngineProcess）不加锁，此处不用 synchronized
         File engineFile = new File(enginePath);
         if (!engineFile.exists()) {
             log.error("皮卡鱼引擎可执行文件不存在: {}", enginePath);
@@ -325,29 +399,86 @@ public class PikafishEngineService {
         pb.redirectErrorStream(true);
 
         this.engineProcess = pb.start();
-        this.engineWriter = new BufferedWriter(new OutputStreamWriter(engineProcess.getOutputStream(), StandardCharsets.UTF_8));
-        this.engineReader = new BufferedReader(new InputStreamReader(engineProcess.getInputStream(), StandardCharsets.UTF_8));
+        this.engineWriter = new BufferedWriter(
+                new OutputStreamWriter(engineProcess.getOutputStream(), StandardCharsets.UTF_8));
 
-        sendCommand("uci");
-        sendCommand("setoption name Threads value " + threads);
-        sendCommand("setoption name Hash value " + hashSize);
-        sendCommand("isready");
+        // 【Fix-B2】启动异步读取线程
+        startEngineReaderThread(
+                new BufferedReader(new InputStreamReader(engineProcess.getInputStream(), StandardCharsets.UTF_8)));
 
+        sendCommandUnsafe("uci");
+        sendCommandUnsafe("setoption name Threads value " + threads);
+        sendCommandUnsafe("setoption name Hash value " + hashSize);
+        sendCommandUnsafe("isready");
+
+        // 等待 readyok，用 poll 真实超时保护
         long start = System.currentTimeMillis();
-        String line;
-        while ((line = engineReader.readLine()) != null) {
-            if ("readyok".equals(line.trim())) {
-                log.info("皮卡鱼引擎初始化成功: {}", enginePath);
-                break;
-            }
-            if (System.currentTimeMillis() - start > 5000) {
-                log.error("皮卡鱼引擎初始化等待 readyok 超时");
+        while (true) {
+            try {
+                String line = engineOutputQueue.poll(200, TimeUnit.MILLISECONDS);
+                if (line == null) {
+                    if (System.currentTimeMillis() - start > 5000) {
+                        log.error("皮卡鱼引擎初始化等待 readyok 超时");
+                        break;
+                    }
+                    continue;
+                }
+                if ("readyok".equals(line.trim())) {
+                    log.info("皮卡鱼引擎初始化成功: {}", enginePath);
+                    break;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
                 break;
             }
         }
     }
 
-    private synchronized void sendCommand(String cmd) throws IOException {
+    /**
+     * 【Fix-B2】启动独立守护线程持续读取引擎 stdout，放入 BlockingQueue
+     */
+    private void startEngineReaderThread(BufferedReader reader) {
+        stopEngineReaderThread(); // 先停止旧线程
+        engineReaderThread = new Thread(() -> {
+            try {
+                String line;
+                while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
+                    // 满了就丢弃最旧的（防止队列溢出）
+                    if (!engineOutputQueue.offer(line, 100, TimeUnit.MILLISECONDS)) {
+                        engineOutputQueue.poll(); // 丢弃一条旧的
+                        engineOutputQueue.offer(line);
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                if (!Thread.currentThread().isInterrupted()) {
+                    log.warn("引擎读取线程异常退出: {}", e.getMessage());
+                }
+            } finally {
+                try { reader.close(); } catch (Exception ignored) {}
+            }
+        }, "pikafish-reader");
+        engineReaderThread.setDaemon(true);
+        engineReaderThread.start();
+    }
+
+    private void stopEngineReaderThread() {
+        if (engineReaderThread != null && engineReaderThread.isAlive()) {
+            engineReaderThread.interrupt();
+            try {
+                engineReaderThread.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            engineReaderThread = null;
+        }
+    }
+
+    /**
+     * 发送命令到引擎（不加锁，调用方负责持有 lock 或在安全上下文中调用）
+     */
+    private void sendCommandUnsafe(String cmd) throws IOException {
         if (engineWriter != null) {
             engineWriter.write(cmd + "\n");
             engineWriter.flush();
@@ -359,7 +490,6 @@ public class PikafishEngineService {
     private static final Pattern SCORE_CP_PATTERN = Pattern.compile("\\bscore\\s+cp\\s+(-?\\d+)");
     private static final Pattern SCORE_MATE_PATTERN = Pattern.compile("\\bscore\\s+mate\\s+(-?\\d+)");
     private static final Pattern PV_PATTERN = Pattern.compile("\\bpv\\s+(.*)$");
-    private static final Pattern SELDEPTH_PATTERN = Pattern.compile("\\bseldepth\\s+(\\d+)");
 
     public EngineAnalysisResult analyzePosition(String fen, Integer movetimeLimit) {
         return analyzePosition(fen, null, movetimeLimit, null, null);
@@ -371,6 +501,7 @@ public class PikafishEngineService {
 
     /**
      * 同步分析（单次出招计算，带严格超时防护与管道排空，支持对局着法历史注入以准确判定重复/长将/长捉）
+     * 【Fix-B1】全部改用 ReentrantLock，无 synchronized
      */
     public EngineAnalysisResult analyzePosition(String fen, Integer depthLimit, Integer movetimeLimit, List<String> moves, String startFen) {
         long sessionId = generateSessionId();
@@ -401,20 +532,19 @@ public class PikafishEngineService {
             // 拿到锁后，确保管道排空且引擎彻底就绪
             ensureEngineReady();
 
-            synchronized (this) {
-                activeSessionId = sessionId;
-                isSearching = true;
-            }
+            // 【Fix-B3】直接赋值 long，无装箱
+            activeSessionId = sessionId;
+            isSearching = true;
 
             // 构建 position 指令
             if (moves != null && !moves.isEmpty()) {
                 if (startFen != null && !startFen.isBlank() && !startFen.startsWith("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR")) {
-                    sendCommand("position fen " + startFen + " moves " + String.join(" ", moves));
+                    sendCommandUnsafe("position fen " + startFen + " moves " + String.join(" ", moves));
                 } else {
-                    sendCommand("position startpos moves " + String.join(" ", moves));
+                    sendCommandUnsafe("position startpos moves " + String.join(" ", moves));
                 }
             } else {
-                sendCommand("position fen " + fen);
+                sendCommandUnsafe("position fen " + fen);
             }
 
             // 安全深度与思考时间约束
@@ -426,17 +556,21 @@ public class PikafishEngineService {
             goCmd.append(" movetime ").append(safeMovetime);
 
             log.info("【皮卡鱼指令】【会话 #{}】单次分析发送: {}", sessionId, goCmd);
-            sendCommand(goCmd.toString());
+            sendCommandUnsafe(goCmd.toString());
 
             // 超时防护：超过期望时间 + 5s 强制杀进程解卡
             int watchdogTimeout = safeMovetime + 5000;
             watchdog = watchdogExecutor.schedule(() -> {
                 log.error("【皮卡鱼严重超时】【会话 #{}】单次分析超过 {} ms 未能返回 bestmove，强制重启引擎解除阻塞", sessionId, watchdogTimeout);
-                restartEngineProcess();
+                lock.lock();
+                try {
+                    restartEngineProcess();
+                } finally {
+                    lock.unlock();
+                }
             }, watchdogTimeout, TimeUnit.MILLISECONDS);
 
-            EngineAnalysisResult result = readUntilBestmove(sessionId, fen, null);
-            return result;
+            return readUntilBestmove(sessionId, fen, null, safeMovetime + 6000);
         } catch (Exception e) {
             log.error("【皮卡鱼分析异常】【会话 #" + sessionId + "】", e);
             return null;
@@ -444,12 +578,11 @@ public class PikafishEngineService {
             if (watchdog != null) {
                 watchdog.cancel(false);
             }
-            synchronized (this) {
-                if (activeSessionId != null && activeSessionId == sessionId) {
-                    activeSessionId = null;
-                }
-                isSearching = false;
+            // 【Fix-B3】long 比较无装箱问题
+            if (activeSessionId == sessionId) {
+                activeSessionId = -1L;
             }
+            isSearching = false;
             lock.unlock();
         }
     }
@@ -463,8 +596,8 @@ public class PikafishEngineService {
     }
 
     /**
-     * 流式分析（SSE 模式）：发送 go depth <safeDepth>，每推深一层通过 callback 推送中间结果，
-     * 具备抢占式中断与排空能力，新请求进入时自动打断旧推演释放锁。
+     * 流式分析（SSE 模式）：发送 go depth <safeDepth>，每推深一层通过 callback 推送中间结果
+     * 【Fix-B1】全部改用 ReentrantLock，无 synchronized
      */
     public EngineAnalysisResult streamAnalyze(long sessionId, String fen, int maxDepth, Consumer<EngineAnalysisResult> onProgress, List<String> moves, String startFen) {
         log.info("【皮卡鱼流式推演】准备启动会话 #{}, FEN: {}, 历史步数: {}", sessionId, fen, moves != null ? moves.size() : 0);
@@ -490,55 +623,65 @@ public class PikafishEngineService {
             // 拿到锁后，确保管道排空且引擎彻底就绪
             ensureEngineReady();
 
-            synchronized (this) {
-                activeSessionId = sessionId;
-                isSearching = true;
-            }
+            // 【Fix-B3】直接赋值 long
+            activeSessionId = sessionId;
+            isSearching = true;
 
             // 限制流式推演最大深度在 15~35 层区间，杜绝 128 层天文运算
             int safeDepth = Math.min(Math.max(maxDepth, 15), 35);
             if (moves != null && !moves.isEmpty()) {
                 if (startFen != null && !startFen.isBlank() && !startFen.startsWith("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR")) {
-                    sendCommand("position fen " + startFen + " moves " + String.join(" ", moves));
+                    sendCommandUnsafe("position fen " + startFen + " moves " + String.join(" ", moves));
                 } else {
-                    sendCommand("position startpos moves " + String.join(" ", moves));
+                    sendCommandUnsafe("position startpos moves " + String.join(" ", moves));
                 }
             } else {
-                sendCommand("position fen " + fen);
+                sendCommandUnsafe("position fen " + fen);
             }
             log.info("【皮卡鱼指令】【会话 #{}】流式推演启动: depth {}", sessionId, safeDepth);
-            sendCommand("go depth " + safeDepth);
+            sendCommandUnsafe("go depth " + safeDepth);
 
-            EngineAnalysisResult result = readUntilBestmove(sessionId, fen, onProgress);
-            return result;
+            // 流式推演超时：深度 35 最多给 5 分钟
+            return readUntilBestmove(sessionId, fen, onProgress, 300_000);
         } catch (Exception e) {
             log.error("【皮卡鱼流式分析异常】【会话 #" + sessionId + "】", e);
             return null;
         } finally {
-            synchronized (this) {
-                if (activeSessionId != null && activeSessionId == sessionId) {
-                    activeSessionId = null;
-                }
-                isSearching = false;
+            // 【Fix-B3】long 比较
+            if (activeSessionId == sessionId) {
+                activeSessionId = -1L;
             }
+            isSearching = false;
             lock.unlock();
         }
     }
 
     /**
-     * 从引擎输出流中持续读取 info 行，解析并回调，直到遇到 bestmove。
-     * @param sessionId 当前会话 ID
-     * @param onProgress 若非 null，每次 info depth 行解析后回调推送中间结果
+     * 【Fix-B2】从 engineOutputQueue 持续消费引擎输出，解析并回调，直到遇到 bestmove 或超时。
+     * @param sessionId   当前会话 ID
+     * @param onProgress  若非 null，每次 info depth 行解析后回调推送中间结果
+     * @param timeoutMs   整体超时毫秒数（防止流式推演永久运行）
      */
-    private EngineAnalysisResult readUntilBestmove(long sessionId, String fen, Consumer<EngineAnalysisResult> onProgress) throws IOException {
+    private EngineAnalysisResult readUntilBestmove(long sessionId, String fen,
+                                                    Consumer<EngineAnalysisResult> onProgress,
+                                                    long timeoutMs) throws InterruptedException {
         EngineAnalysisResult result = new EngineAnalysisResult();
         result.setFromCache(false);
         result.setFromBook(false);
         String lastPvLine = null;
         int lastReportedDepth = 0;
+        long deadline = System.currentTimeMillis() + timeoutMs;
 
-        String line;
-        while ((line = engineReader.readLine()) != null) {
+        while (true) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                log.warn("【皮卡鱼超时】【会话 #{}】readUntilBestmove 超过 {} ms，强制返回当前结果", sessionId, timeoutMs);
+                break;
+            }
+            // 【Fix-B2】poll 带真实超时，不会永远阻塞
+            String line = engineOutputQueue.poll(Math.min(remaining, 500), TimeUnit.MILLISECONDS);
+            if (line == null) continue; // 超时间隙，继续等
+
             line = line.trim();
             if (line.startsWith("info ")) {
                 // 跳过 upperbound/lowerbound 的非最终行
@@ -696,9 +839,12 @@ public class PikafishEngineService {
     public void destroy() {
         try {
             watchdogExecutor.shutdownNow();
+            stopEngineReaderThread();
             if (engineWriter != null) {
-                engineWriter.write("quit\n");
-                engineWriter.flush();
+                try {
+                    engineWriter.write("quit\n");
+                    engineWriter.flush();
+                } catch (Exception ignored) {}
             }
             if (engineProcess != null) {
                 engineProcess.waitFor(1, TimeUnit.SECONDS);
