@@ -75,21 +75,41 @@ public class ChessApiController {
                         .advantageDescription("开局定式（棋逢对手）")
                         .sideAdvantageText("双方均势 (开局库)")
                         .fromBook(true)
+                        .fromCache(false)
                         .bookMoves(bookMoves)
                         .build();
             }
         }
 
-        log.info("【皮卡鱼深度推演】开局库未启用或脱谱，启动引擎计算...");
-        // 2. 脱谱或强制引擎：调用皮卡鱼引擎
+        // 2. 检查 L1 快速缓存（上一手推导的预热分析或历史分析，0ms 响应）
+        Boolean noCache = request.containsKey("noCache") && Boolean.TRUE.equals(request.get("noCache"));
+        if (!forceEngine && !noCache) {
+            EngineAnalysisResult cached = pikafishEngineService.getCachedAnalysis(fen);
+            if (cached != null && cached.getDepth() != null && cached.getDepth() >= 12) {
+                log.info("【L1缓存命中】返回复用分析 (0ms), 着法: {} ({}), 深度: {}, 分值: {}",
+                        cached.getBestMove(), cached.getBestMoveChinese(), cached.getDepth(), cached.getScoreCp());
+                if (cached.getBestMoveChinese() == null && cached.getBestMove() != null) {
+                    cached.setBestMoveChinese(coordinateConverter.uciToChinese(fen, cached.getBestMove()));
+                }
+                if (cached.getPvMovesChinese() == null && cached.getPvMoves() != null) {
+                    cached.setPvMovesChinese(coordinateConverter.convertMoveList(fen, cached.getPvMoves()));
+                }
+                return cached;
+            }
+        }
+
+        log.info("【皮卡鱼深度推演】开局库脱谱且无高深度缓存，启动引擎计算...");
+        // 3. 脱谱或强制引擎：调用皮卡鱼引擎
         long startTime = System.currentTimeMillis();
         EngineAnalysisResult result = pikafishEngineService.analyzePosition(fen, depth, movetime);
         long elapsed = System.currentTimeMillis() - startTime;
         log.info("【皮卡鱼推演完成】耗时: {} ms, 最佳着法: {}, 深度: {}", elapsed, result != null ? result.getBestMove() : "null", result != null ? result.getDepth() : 0);
         if (result != null) {
             result.setFromBook(false);
-            if (result.getBestMove() != null) {
+            if (result.getBestMove() != null && result.getBestMoveChinese() == null) {
                 result.setBestMoveChinese(coordinateConverter.uciToChinese(fen, result.getBestMove()));
+            }
+            if (result.getPvMoves() != null && result.getPvMovesChinese() == null) {
                 result.setPvMovesChinese(coordinateConverter.convertMoveList(fen, result.getPvMoves()));
             }
         }
@@ -176,14 +196,37 @@ public class ChessApiController {
                     }
                 }
 
-                // 2. 启动皮卡鱼流式深算
+                // 2. 检查是否有预热的 L1 缓存。如果有，0ms 先推送一条预热首帧给前端，让界面瞬间显示评分与走法！
+                EngineAnalysisResult cached = pikafishEngineService.getCachedAnalysis(fen);
+                if (cached != null) {
+                    log.info("【流式推演预热】立即先推送 L1 缓存首帧 (0ms), 着法: {}, depth: {}", cached.getBestMove(), cached.getDepth());
+                    if (cached.getBestMoveChinese() == null && cached.getBestMove() != null) {
+                        cached.setBestMoveChinese(coordinateConverter.uciToChinese(fen, cached.getBestMove()));
+                    }
+                    if (cached.getPvMovesChinese() == null && cached.getPvMoves() != null) {
+                        cached.setPvMovesChinese(coordinateConverter.convertMoveList(fen, cached.getPvMoves()));
+                    }
+                    if (cached.getPonderMove() != null && cached.getPonderMoveChinese() == null && cached.getBestMove() != null) {
+                        String nextFen = coordinateConverter.applyMove(fen, cached.getBestMove());
+                        cached.setPonderMoveChinese(coordinateConverter.uciToChinese(nextFen, cached.getPonderMove()));
+                    }
+                    try {
+                        emitter.send(SseEmitter.event().name("analysis").data(cached));
+                    } catch (Exception ignored) {}
+                }
+
+                // 3. 启动皮卡鱼流式深算（利用引擎底层 TT Hash 记忆继续向下深算）
                 pikafishEngineService.streamAnalyze(fen, depth, snapshot -> {
                     try {
-                        if (snapshot.getBestMove() != null) {
+                        if (snapshot.getBestMove() != null && snapshot.getBestMoveChinese() == null) {
                             snapshot.setBestMoveChinese(coordinateConverter.uciToChinese(fen, snapshot.getBestMove()));
                         }
-                        if (snapshot.getPvMoves() != null) {
+                        if (snapshot.getPvMoves() != null && snapshot.getPvMovesChinese() == null) {
                             snapshot.setPvMovesChinese(coordinateConverter.convertMoveList(fen, snapshot.getPvMoves()));
+                        }
+                        if (snapshot.getPonderMove() != null && snapshot.getPonderMoveChinese() == null && snapshot.getBestMove() != null) {
+                            String nextFen = coordinateConverter.applyMove(fen, snapshot.getBestMove());
+                            snapshot.setPonderMoveChinese(coordinateConverter.uciToChinese(nextFen, snapshot.getPonderMove()));
                         }
                         emitter.send(SseEmitter.event().name("analysis").data(snapshot));
                     } catch (Exception e) {

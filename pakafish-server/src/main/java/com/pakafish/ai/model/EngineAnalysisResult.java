@@ -33,6 +33,12 @@ public class EngineAnalysisResult {
     private String advantageDescription;
     /** 明确的红黑优劣描述 (例如: 红优 +180分 或 黑优 +240分 或 双方均势) */
     private String sideAdvantageText;
+    /** 预判对手应手走法 (UCI坐标，例如 b9c7) */
+    private String ponderMove;
+    /** 预判对手应手走法中文记谱 (例如 马8进7) */
+    private String ponderMoveChinese;
+    /** 是否命中内存快速缓存 */
+    private Boolean fromCache;
     /** 是否命中开局库 */
     private Boolean fromBook;
     /** 开局库候选招法列表 (若命中开局库) */

@@ -188,6 +188,63 @@ public class ChessCoordinateConverter {
         return board;
     }
 
+    /**
+     * 将棋盘二维数组序列化回规范 FEN 字符串
+     */
+    public String boardToFen(char[][] board, boolean isRedTurn) {
+        StringBuilder sb = new StringBuilder();
+        for (int r = 9; r >= 0; r--) {
+            int empty = 0;
+            for (int c = 0; c < 9; c++) {
+                char p = board[r][c];
+                if (p == ' ') {
+                    empty++;
+                } else {
+                    if (empty > 0) {
+                        sb.append(empty);
+                        empty = 0;
+                    }
+                    sb.append(p);
+                }
+            }
+            if (empty > 0) {
+                sb.append(empty);
+            }
+            if (r > 0) {
+                sb.append('/');
+            }
+        }
+        sb.append(isRedTurn ? " w - - 0 1" : " b - - 0 1");
+        return sb.toString();
+    }
+
+    /**
+     * 在给定 FEN 上模拟走一步 UCI 着法，生成下一步的新 FEN
+     */
+    public String applyMove(String fen, String uciMove) {
+        if (fen == null || uciMove == null || uciMove.length() < 4) {
+            return fen;
+        }
+        try {
+            char[][] board = parseFenToBoard(fen);
+            boolean isRedTurn = !fen.contains(" b ");
+
+            int fc = uciMove.charAt(0) - 'a';
+            int fr = uciMove.charAt(1) - '0';
+            int tc = uciMove.charAt(2) - 'a';
+            int tr = uciMove.charAt(3) - '0';
+
+            if (fr >= 0 && fr < 10 && fc >= 0 && fc < 9 && tr >= 0 && tr < 10 && tc >= 0 && tc < 9) {
+                board[tr][tc] = board[fr][fc];
+                board[fr][fc] = ' ';
+            }
+
+            return boardToFen(board, !isRedTurn);
+        } catch (Exception e) {
+            return fen;
+        }
+    }
+
     private String getPieceName(char p) {
         return switch (p) {
             case 'R' -> "车";

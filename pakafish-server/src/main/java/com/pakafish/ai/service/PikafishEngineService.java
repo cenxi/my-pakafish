@@ -51,6 +51,162 @@ public class PikafishEngineService {
         return t;
     });
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private ChessCoordinateConverter coordinateConverter;
+
+    /**
+     * L1 内存高速缓存：记录已分析过的局面以及由 PV 变例预热推导出的后续子局面。
+     * LRU 淘汰策略，最大保留 2000 个局面。
+     */
+    private final java.util.Map<String, EngineAnalysisResult> analysisCache = java.util.Collections.synchronizedMap(
+        new java.util.LinkedHashMap<String, EngineAnalysisResult>(256, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<String, EngineAnalysisResult> eldest) {
+                return size() > 2000;
+            }
+        }
+    );
+
+    /**
+     * 规范化 FEN 串：去除半步计数与总回合数，保留局面布局与走子方，最大化同型局面缓存命中
+     */
+    public static String normalizeFen(String fen) {
+        if (fen == null) return "";
+        String[] parts = fen.trim().split("\\s+");
+        if (parts.length >= 2) {
+            return parts[0] + " " + parts[1];
+        }
+        return fen.trim();
+    }
+
+    /**
+     * 从 L1 高速缓存中获取局面分析结果
+     */
+    public EngineAnalysisResult getCachedAnalysis(String fen) {
+        if (fen == null) return null;
+        String key = normalizeFen(fen);
+        EngineAnalysisResult cached = analysisCache.get(key);
+        if (cached != null) {
+            return copyResult(cached);
+        }
+        return null;
+    }
+
+    /**
+     * 将分析结果存入 L1 缓存，并自动基于 PV 主要变例推导后续子局面进行预热
+     */
+    public void cacheAnalysis(String fen, EngineAnalysisResult result) {
+        if (fen == null || result == null || result.getBestMove() == null) return;
+        cacheResult(fen, result);
+        deriveAndCacheChildPositions(fen, result);
+    }
+
+    /**
+     * 基于 PV 变例树向下预热推导 1~2 步子局面：
+     * P0 (红) 算出 PV = [m1, m2, m3, m4]
+     * -> P1 = applyMove(P0, m1) (黑方走子，其最佳应手为 m2，红方 ponder 为 m3，PV 为 [m2, m3, m4]，深度为 D-1，绝对评分一致)
+     * -> P2 = applyMove(P1, m2) (红方走子，最佳应手为 m3，PV 为 [m3, m4]，深度为 D-2)
+     */
+    private void deriveAndCacheChildPositions(String fen, EngineAnalysisResult result) {
+        if (coordinateConverter == null || result == null || result.getPvMoves() == null || result.getPvMoves().size() < 2) {
+            return;
+        }
+        List<String> pv = result.getPvMoves();
+        int currentDepth = result.getDepth() != null ? result.getDepth() : 10;
+        if (currentDepth <= 2) return;
+
+        try {
+            // 推导 P1: 对方回合 (下出 m1 后的局面)
+            String m1 = pv.get(0);
+            String m2 = pv.get(1);
+            String fen1 = coordinateConverter.applyMove(fen, m1);
+            List<String> pv1 = new java.util.ArrayList<>(pv.subList(1, pv.size()));
+            String m3 = pv.size() > 2 ? pv.get(2) : null;
+
+            EngineAnalysisResult r1 = EngineAnalysisResult.builder()
+                    .bestMove(m2)
+                    .bestMoveChinese(coordinateConverter.uciToChinese(fen1, m2))
+                    .ponderMove(m3)
+                    .scoreCp(result.getScoreCp())
+                    .winRate(result.getWinRate())
+                    .depth(Math.max(1, currentDepth - 1))
+                    .pvMoves(pv1)
+                    .pvMovesChinese(coordinateConverter.convertMoveList(fen1, pv1))
+                    .advantageDescription(result.getAdvantageDescription())
+                    .sideAdvantageText(result.getSideAdvantageText())
+                    .fromBook(false)
+                    .fromCache(true)
+                    .build();
+
+            if (m3 != null) {
+                String fen2ForZh = coordinateConverter.applyMove(fen1, m2);
+                r1.setPonderMoveChinese(coordinateConverter.uciToChinese(fen2ForZh, m3));
+            }
+            cacheResult(fen1, r1);
+
+            // 推导 P2: 如果 PV 长度 >= 3 且深度 >= 4，进一步推导再下一回合
+            if (pv.size() >= 3 && currentDepth >= 4) {
+                String fen2 = coordinateConverter.applyMove(fen1, m2);
+                List<String> pv2 = new java.util.ArrayList<>(pv.subList(2, pv.size()));
+                String m4 = pv.size() > 3 ? pv.get(3) : null;
+
+                EngineAnalysisResult r2 = EngineAnalysisResult.builder()
+                        .bestMove(m3)
+                        .bestMoveChinese(coordinateConverter.uciToChinese(fen2, m3))
+                        .ponderMove(m4)
+                        .scoreCp(result.getScoreCp())
+                        .winRate(result.getWinRate())
+                        .depth(Math.max(1, currentDepth - 2))
+                        .pvMoves(pv2)
+                        .pvMovesChinese(coordinateConverter.convertMoveList(fen2, pv2))
+                        .advantageDescription(result.getAdvantageDescription())
+                        .sideAdvantageText(result.getSideAdvantageText())
+                        .fromBook(false)
+                        .fromCache(true)
+                        .build();
+
+                if (m4 != null) {
+                    String fen3ForZh = coordinateConverter.applyMove(fen2, m3);
+                    r2.setPonderMoveChinese(coordinateConverter.uciToChinese(fen3ForZh, m4));
+                }
+                cacheResult(fen2, r2);
+            }
+        } catch (Exception e) {
+            log.debug("子节点PV预热解析跳过: {}", e.getMessage());
+        }
+    }
+
+    private void cacheResult(String fen, EngineAnalysisResult result) {
+        if (fen == null || result == null || result.getBestMove() == null) return;
+        String key = normalizeFen(fen);
+        EngineAnalysisResult existing = analysisCache.get(key);
+        if (existing != null && existing.getDepth() != null && result.getDepth() != null
+                && existing.getDepth() > result.getDepth()) {
+            return;
+        }
+        analysisCache.put(key, copyResult(result));
+    }
+
+    private EngineAnalysisResult copyResult(EngineAnalysisResult src) {
+        if (src == null) return null;
+        return EngineAnalysisResult.builder()
+                .bestMove(src.getBestMove())
+                .bestMoveChinese(src.getBestMoveChinese())
+                .ponderMove(src.getPonderMove())
+                .ponderMoveChinese(src.getPonderMoveChinese())
+                .scoreCp(src.getScoreCp())
+                .winRate(src.getWinRate())
+                .depth(src.getDepth())
+                .pvMoves(src.getPvMoves() != null ? new java.util.ArrayList<>(src.getPvMoves()) : null)
+                .pvMovesChinese(src.getPvMovesChinese() != null ? new java.util.ArrayList<>(src.getPvMovesChinese()) : null)
+                .advantageDescription(src.getAdvantageDescription())
+                .sideAdvantageText(src.getSideAdvantageText())
+                .fromBook(src.getFromBook())
+                .fromCache(src.getFromCache() != null ? src.getFromCache() : true)
+                .bookMoves(src.getBookMoves())
+                .build();
+    }
+
     /**
      * 强行中断当前正在运行的推演（使引擎立即吐出当前深度的 bestmove）
      */
@@ -337,6 +493,9 @@ public class PikafishEngineService {
                     lastReportedDepth = result.getDepth();
                     // 构建中间快照（含红黑绝对分值转换）
                     EngineAnalysisResult snapshot = buildSnapshot(result, fen);
+                    if (snapshot.getDepth() != null && snapshot.getDepth() >= 12) {
+                        cacheAnalysis(fen, snapshot);
+                    }
                     try {
                         onProgress.accept(snapshot);
                     } catch (Exception e) {
@@ -351,6 +510,9 @@ public class PikafishEngineService {
                 if (parts.length >= 2) {
                     result.setBestMove(parts[1]);
                 }
+                if (parts.length >= 4 && "ponder".equalsIgnoreCase(parts[2])) {
+                    result.setPonderMove(parts[3]);
+                }
                 break;
             }
         }
@@ -361,8 +523,29 @@ public class PikafishEngineService {
             result.setPvMoves(List.of(result.getBestMove()));
         }
 
+        if (result.getPonderMove() == null && result.getPvMoves() != null && result.getPvMoves().size() >= 2) {
+            result.setPonderMove(result.getPvMoves().get(1));
+        }
+
         // 转换为红方绝对分值
         applyAbsoluteScore(result, fen);
+
+        // 填充中文记谱
+        if (coordinateConverter != null) {
+            if (result.getBestMove() != null) {
+                result.setBestMoveChinese(coordinateConverter.uciToChinese(fen, result.getBestMove()));
+            }
+            if (result.getPvMoves() != null && !result.getPvMoves().isEmpty()) {
+                result.setPvMovesChinese(coordinateConverter.convertMoveList(fen, result.getPvMoves()));
+            }
+            if (result.getPonderMove() != null && result.getBestMove() != null) {
+                String nextFen = coordinateConverter.applyMove(fen, result.getBestMove());
+                result.setPonderMoveChinese(coordinateConverter.uciToChinese(nextFen, result.getPonderMove()));
+            }
+        }
+
+        // 存入 L1 快速缓存并预热推导子局面
+        cacheAnalysis(fen, result);
         return result;
     }
 
@@ -374,7 +557,11 @@ public class PikafishEngineService {
         snap.setWinRate(src.getWinRate());
         snap.setBestMove(src.getBestMove());
         snap.setPvMoves(src.getPvMoves());
+        if (src.getPvMoves() != null && src.getPvMoves().size() >= 2) {
+            snap.setPonderMove(src.getPvMoves().get(1));
+        }
         snap.setFromBook(false);
+        snap.setFromCache(false);
         applyAbsoluteScore(snap, fen);
         return snap;
     }
