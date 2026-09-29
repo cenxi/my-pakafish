@@ -262,8 +262,11 @@ public class PikafishEngineService {
                     EngineAnalysisResult snapshot = buildSnapshot(result, fen);
                     try {
                         onProgress.accept(snapshot);
-                    } catch (Exception ignored) {
-                        // SSE 客户端断开，忽略
+                    } catch (Exception e) {
+                        // 客户端断开连接（Broken pipe），立刻中断引擎计算并退出循环！
+                        log.info("【SSE客户端已断开】立即 stop 中断皮卡鱼深算");
+                        stopCurrentSearch();
+                        break;
                     }
                 }
             } else if (line.startsWith("bestmove ")) {

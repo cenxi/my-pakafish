@@ -187,13 +187,19 @@ public class ChessApiController {
                         }
                         emitter.send(SseEmitter.event().name("analysis").data(snapshot));
                     } catch (Exception e) {
-                        log.debug("SSE 发送中断: {}", e.getMessage());
+                        // 客户端已断开，抛出运行时异常让皮卡鱼引擎立刻终止循环
+                        pikafishEngineService.stopCurrentSearch();
+                        throw new RuntimeException("SSE_CLIENT_DISCONNECTED", e);
                     }
                 });
 
-                emitter.complete();
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {}
             } catch (Exception e) {
-                emitter.completeWithError(e);
+                try {
+                    emitter.completeWithError(e);
+                } catch (Exception ignored) {}
             }
         });
 
